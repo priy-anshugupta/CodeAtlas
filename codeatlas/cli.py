@@ -1,0 +1,1444 @@
+"""`codeatlas` command-line interface. Thin wrappers over library functions."""
+
+from __future__ import annotations
+
+import contextlib
+import json
+import sqlite3
+import sys
+from collections.abc import Callable
+from contextvars import ContextVar
+from dataclasses import dataclass
+from functools import wraps
+from pathlib import Path
+from typing import Annotated, Any, TypeVar
+
+import click
+import typer
+from rich.console import Console
+
+from codeatlas import __version__
+from codeatlas.consent import RepoState
+from codeatlas.core.errors import EXIT_INTERNAL, CodeAtlasError, UserError
+from codeatlas.core.paths import AICONTEXT, find_repo_root
+
+app = typer.Typer(
+    name="codeatlas",
+    help="CODEATLAS: a persistent, local context layer for AI coding agents.",
+    no_args_is_help=True,
+    add_completion=False,
+    pretty_exceptions_enable=False,
+)
+hook_app = typer.Typer(help="Entry points for host-agent hooks (read hook JSON on stdin).")
+refresh_app = typer.Typer(
+    help="Keep AGENTS.md and module summaries current (codeatlas-refresh skill).",
+    invoke_without_command=True,
+)
+app.add_typer(hook_app, name="hook")
+audit_app = typer.Typer(help="Agent-driven codebase audit (codeatlas-audit skill).")
+app.add_typer(refresh_app, name="refresh")
+app.add_typer(audit_app, name="audit")
+cache_app = typer.Typer(help="Inspect and prune disposable caches.")
+app.add_typer(cache_app, name="cache")
+
+out = Console(highlight=False)
+err = Console(stderr=True, highlight=False)
+
+F = TypeVar("F", bound=Callable[..., Any])
+
+RootOption = Annotated[
+    Path | None,
+    typer.Option("--root", help="Repository root (default: detected from the current directory)."),
+]
+JsonOption = Annotated[bool, typer.Option("--json", help="Machine-readable output.")]
+QuietOption = Annotated[
+    bool, typer.Option("--quiet", "-q", help="No output unless there is an error.")
+]
+
+
+@dataclass(frozen=True)
+class _CliDefaults:
+    root: Path | None = None
+    session: str | None = None
+
+
+_CLI_DEFAULTS: ContextVar[_CliDefaults | None] = ContextVar("codeatlas_cli_defaults", default=None)
+
+
+def _defaults() -> _CliDefaults:
+    return _CLI_DEFAULTS.get() or _CliDefaults()
+
+
+def emit(text: str) -> None:
+    """Plain output: never interpreted as Rich markup."""
+    typer.echo(text)
+
+
+def emit_json(data: Any) -> None:
+    typer.echo(json.dumps(data, indent=2, ensure_ascii=False, sort_keys=True))
+
+
+def _output(data: dict[str, Any], as_json: bool, renderer: Callable[[dict[str, Any]], str]) -> None:
+    if as_json:
+        emit_json(data)
+    else:
+        emit(renderer(data))
+
+
+def _root(root: Path | None) -> Path:
+    chosen = root or _defaults().root
+    if chosen is not None and not Path(chosen).is_dir():
+        raise UserError(f"--root {chosen} is not a directory.")
+    return (chosen or find_repo_root(Path.cwd())).resolve()
+
+
+def handle_errors(fn: F) -> F:
+    @wraps(fn)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        try:
+            try:
+                return fn(*args, **kwargs)
+            except sqlite3.DatabaseError as exc:
+                from codeatlas.navigator.database_errors import database_problem
+
+                problem = database_problem(exc)
+                if problem is not None:
+                    raise problem from exc
+                # A damaged disposable cache: drop every cache and answer from the artifacts.
+                from codeatlas.navigator.cache_db import purge_disposable_caches
+
+                purge_disposable_caches(_root(kwargs.get("root")))
+                return fn(*args, **kwargs)
+        except typer.Exit:
+            raise
+        except (typer.Abort, click.exceptions.Abort):
+            err.print("Aborted; nothing was changed.")
+            raise typer.Exit(1) from None
+        except CodeAtlasError as exc:
+            if kwargs.get("as_json"):
+                emit_json(exc.to_dict())
+            else:
+                err.print(f"[red]error:[/red] {exc}", markup=True, highlight=False)
+                for key in ("candidates", "suggestions", "problems"):
+                    for v in (exc.details.get(key) or [])[:10]:
+                        err.print(f"  {v['id'] if isinstance(v, dict) else v}", markup=False)
+            raise typer.Exit(exc.exit_code) from exc
+        except Exception as exc:
+            err.print(f"[red]internal error:[/red] {type(exc).__name__}: {exc}")
+            raise typer.Exit(EXIT_INTERNAL) from exc
+
+    return wrapper  # type: ignore[return-value]
+
+
+@cache_app.command("gc")
+@handle_errors
+def cache_gc(
+    root: RootOption = None,
+    as_json: JsonOption = False,
+    keep: Annotated[int, typer.Option(min=0, help="Maximum saved logs.")] = 40,
+    max_bytes: Annotated[
+        int, typer.Option(min=0, help="Maximum saved-log bytes including metadata.")
+    ] = 32 * 1024 * 1024,
+    age_days: Annotated[float, typer.Option(min=0, help="Maximum saved-log age in days.")] = 30,
+) -> None:
+    from codeatlas.cache_cleanup import cache_size, collect_tee
+
+    chosen = _root(root)
+    result = collect_tee(chosen, keep=keep, max_bytes=max_bytes, age_days=age_days)
+    count, size = cache_size(chosen)
+    if as_json:
+        emit_json({**result, "cache_files": count, "cache_bytes": size})
+    else:
+        emit(
+            f"Removed {result['removed_files']} saved-log files ({result['removed_bytes']} bytes). "
+            f"Kept {result['kept_logs']} logs ({result['kept_bytes']} bytes); total cache {size} bytes."
+        )
+        if result["unsafe_path"]:
+            emit("Skipped cleanup: cache path contains a symlink.")
+
+
+def _version_callback(value: bool) -> None:
+    if value:
+        out.print(f"codeatlas {__version__}")
+        raise typer.Exit()
+
+
+@app.callback()
+def _main(
+    ctx: typer.Context,
+    version: Annotated[
+        bool,
+        typer.Option("--version", callback=_version_callback, is_eager=True, help="Show version."),
+    ] = False,
+    root: RootOption = None,
+    session: Annotated[
+        str | None, typer.Option("--session", help="Default task retrieval session.")
+    ] = None,
+) -> None:
+    """CODEATLAS maps a codebase once and keeps the map fresh for coding agents."""
+    token = _CLI_DEFAULTS.set(_CliDefaults(root, session))
+    ctx.call_on_close(lambda: _CLI_DEFAULTS.reset(token))
+
+
+# --- setup and consent ---------------------------------------------------------
+
+
+@app.command()
+@handle_errors
+def init(
+    root: RootOption = None,
+    agent: Annotated[
+        str,
+        typer.Option(
+            "--agent",
+            help="claude-code | cursor | codex | gemini | antigravity | generic | auto | none",
+        ),
+    ] = "auto",
+    hooks: Annotated[
+        bool | None, typer.Option("--hooks/--no-hooks", help="Agent hooks (default: on).")
+    ] = None,
+    mcp: Annotated[
+        bool | None,
+        typer.Option(
+            "--mcp/--no-mcp",
+            help="Register the MCP server (default: off where hooks exist; hooks work better).",
+        ),
+    ] = None,
+    git_hooks: Annotated[
+        bool | None,
+        typer.Option("--git-hooks/--no-git-hooks", help="Git post-commit/merge/checkout hooks."),
+    ] = None,
+    all_skills: Annotated[
+        bool,
+        typer.Option("--all-skills", help="Also install the audit, refresh and decisions skills."),
+    ] = False,
+    dedupe_reads: Annotated[
+        bool,
+        typer.Option(
+            "--dedupe-reads",
+            help="Claude Code: refuse to re-read an unchanged file already in context (opt-in).",
+        ),
+    ] = False,
+    shorten_output: Annotated[
+        bool,
+        typer.Option(
+            "--shorten-output",
+            help="Claude Code: shorten long command output before it is read, failures kept (opt-in).",
+        ),
+    ] = False,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip prompts (scripted use).")] = False,
+    run_scan: Annotated[
+        bool | None,
+        typer.Option("--scan/--no-scan", help="Run the initial scan without asking."),
+    ] = None,
+) -> None:
+    """Enable CODEATLAS in this repo. Shows every change first and asks before making it."""
+    from codeatlas.integrations import (
+        HAS_HOOKS,
+        HAS_MCP,
+        IntegrationOptions,
+        detect_agents,
+        get_integration,
+    )
+    from codeatlas.integrations.git_hooks import hooks_dir
+    from codeatlas.lifecycle import apply_init, plan_init, scan
+
+    repo = _root(root)
+    if agent == "none":
+        agents: list[str] = []
+    elif agent == "auto":
+        agents = detect_agents(repo)
+    else:
+        agents = [agent]
+
+    def ask(question: str, current: bool | None, relevant: bool) -> bool:
+        if not relevant:
+            return False
+        if current is not None:
+            return current
+        return True if yes else typer.confirm(question, default=True)
+
+    options = IntegrationOptions(
+        hooks=ask(
+            "Install agent hooks (brief at session start, the code a request needs added to "
+            "the prompt, index update after edits)?",
+            hooks,
+            bool(HAS_HOOKS & set(agents)),
+        ),
+        # The default is hook + MCP: the hook puts the first answer in the request, and
+        # `codeatlas_task` (one tool, loaded upfront) serves every follow-up. `--no-mcp` opts out.
+        mcp=ask(
+            "Register the CODEATLAS MCP server for your agent?",
+            mcp,
+            bool(HAS_MCP & set(agents)),
+        ),
+        all_skills=all_skills,
+        dedupe_reads=dedupe_reads,
+        shorten_output=shorten_output,
+    )
+    use_git_hooks = ask(
+        "Install git hooks (update the index after commit/merge/checkout)?",
+        git_hooks,
+        hooks_dir(repo) is not None,
+    )
+    plan = plan_init(repo, agents, options, use_git_hooks)
+    if plan.is_noop:
+        out.print(f"CODEATLAS is already initialized and enabled in {repo.as_posix()}.")
+    else:
+        out.print(f"CODEATLAS will make these changes in [bold]{repo.as_posix()}[/bold]:")
+        for change in plan.changes:
+            out.print(f"  {change.kind:<8} {change.target}  [dim]({change.detail})[/dim]")
+        if not yes and not typer.confirm("Proceed?", default=True):
+            out.print("Nothing changed.")
+            raise typer.Exit(0)
+        apply_init(plan)
+        out.print("[green]CODEATLAS initialized.[/green]")
+        if "antigravity" in agents and options.mcp:
+            _offer_antigravity_mcp(yes)
+        for name in agents:
+            for note in get_integration(name).notes(repo, options):
+                out.print(f"[yellow]note ({name}):[/yellow] {note}", markup=True, highlight=False)
+
+    do_scan = (
+        run_scan
+        if run_scan is not None
+        else (True if yes else typer.confirm("Run the initial scan now?", default=True))
+    )
+    if do_scan:
+        _print_scan(scan(repo), as_json=False)
+    else:
+        out.print("Run `codeatlas scan` when you're ready to build the index.")
+
+
+def _offer_antigravity_mcp(yes: bool) -> None:
+    """Antigravity reads MCP servers only from a user-level list: add CODEATLAS there if asked."""
+    from codeatlas.integrations.antigravity import register_user_mcp, user_mcp_registered
+
+    if yes or user_mcp_registered() is not False:
+        # Scripted runs never change user-level settings; an installed entry or a missing agy
+        # needs nothing here (the printed note explains the manual step).
+        return
+    question = (
+        "Add the CODEATLAS MCP server to Antigravity's user-level settings "
+        "(runs `agy mcp add codeatlas codeatlas mcp`)?"
+    )
+    if typer.confirm(question, default=True) and register_user_mcp():
+        out.print("Antigravity: CODEATLAS MCP server added (`agy mcp remove codeatlas` removes it).")
+
+
+@app.command("uninstall-integration")
+@handle_errors
+def uninstall_integration(
+    root: RootOption = None,
+    purge: Annotated[
+        bool, typer.Option("--purge", help="Also delete .aicontext/ and your consent flag.")
+    ] = False,
+    yes: Annotated[bool, typer.Option("--yes", "-y")] = False,
+) -> None:
+    """Remove every CODEATLAS-managed block, hook, MCP entry, and skill (restoring backups)."""
+    from codeatlas.lifecycle import apply_uninstall, plan_uninstall
+
+    repo = _root(root)
+    removals = plan_uninstall(repo)
+    if not removals and not purge:
+        out.print("No CODEATLAS integration files found.")
+        return
+    for change in removals:
+        out.print(f"  remove   {change.path}  [dim]({change.detail})[/dim]")
+    if purge:
+        out.print(
+            f"  delete   {AICONTEXT}/  [dim](the whole index, including audit findings)[/dim]"
+        )
+    if not yes and not typer.confirm("Proceed?", default=False):
+        out.print("Nothing changed.")
+        raise typer.Exit(0)
+    apply_uninstall(repo, removals, purge=purge)
+    from codeatlas.integrations.antigravity import unregister_user_mcp, user_mcp_registered
+
+    if (
+        not yes
+        and user_mcp_registered()
+        and typer.confirm("Also remove the CODEATLAS MCP server from Antigravity's user settings?")
+        and unregister_user_mcp()
+    ):
+        out.print("Antigravity: CODEATLAS MCP server removed.")
+    out.print("CODEATLAS integration removed." + (" Index deleted." if purge else ""))
+
+
+@app.command()
+@handle_errors
+def install(
+    global_: Annotated[
+        bool, typer.Option("--global", help="Required: user-level agent note.")
+    ] = False,
+    suggest: Annotated[
+        bool, typer.Option("--suggest", help="Let agents mention CODEATLAS once in large repos.")
+    ] = False,
+) -> None:
+    """Add a short user-level note to your agent's global instructions (opt-in)."""
+    from codeatlas.integrations.global_note import install_global
+
+    if not global_:
+        raise UserError("use `codeatlas install --global`; per-repo setup is `codeatlas init`")
+    changed = install_global(suggest)
+    for path in changed:
+        out.print(f"updated {path}")
+    if not changed:
+        out.print("Global note already installed.")
+
+
+@app.command()
+@handle_errors
+def uninstall(
+    global_: Annotated[
+        bool, typer.Option("--global", help="Required: remove the user-level note.")
+    ] = False,
+) -> None:
+    """Remove the user-level note added by `codeatlas install --global`."""
+    from codeatlas.integrations.global_note import uninstall_global
+
+    if not global_:
+        raise UserError(
+            "use `codeatlas uninstall --global`; per-repo removal is `codeatlas uninstall-integration`"
+        )
+    changed = uninstall_global()
+    for path in changed:
+        out.print(f"updated {path}")
+    if not changed:
+        out.print("No global note found.")
+
+
+@app.command()
+@handle_errors
+def enable(root: RootOption = None) -> None:
+    """Enable CODEATLAS for you in this repo (local flag, never committed)."""
+    from codeatlas.lifecycle import set_enabled
+
+    set_enabled(_root(root), True)
+    out.print("CODEATLAS enabled for you in this repo.")
+
+
+@app.command()
+@handle_errors
+def disable(root: RootOption = None) -> None:
+    """Disable CODEATLAS for you in this repo. Nothing in the repo changes."""
+    from codeatlas.lifecycle import set_enabled
+
+    set_enabled(_root(root), False)
+    out.print("CODEATLAS disabled for you in this repo.")
+
+
+@app.command()
+@handle_errors
+def pause(root: RootOption = None) -> None:
+    """Stop all automatic CODEATLAS activity in this repo without removing anything."""
+    from codeatlas.lifecycle import set_paused
+
+    set_paused(_root(root), True)
+    out.print("CODEATLAS paused. Hooks are no-ops until `codeatlas resume`.")
+
+
+@app.command()
+@handle_errors
+def resume(root: RootOption = None) -> None:
+    """Resume automatic CODEATLAS activity after `codeatlas pause`."""
+    from codeatlas.lifecycle import set_paused
+
+    set_paused(_root(root), False)
+    out.print("CODEATLAS resumed.")
+
+
+# --- index -----------------------------------------------------------------------
+
+
+def _print_scan(manifest: dict[str, Any], as_json: bool) -> None:
+    stats = manifest.get("stats", {})
+    if as_json:
+        emit_json({"stats": stats, "last_scan": manifest.get("last_scan")})
+        return
+    out.print(
+        f"Indexed {stats.get('files', 0)} files · {stats.get('symbols', 0)} symbols · "
+        f"{stats.get('import_edges', 0)} import edges · {stats.get('call_edges', 0)} call edges"
+        + (
+            f" · [yellow]{stats['parse_errors']} parse errors[/yellow]"
+            if stats.get("parse_errors")
+            else ""
+        )
+    )
+
+
+@app.command("scan")
+@handle_errors
+def scan_cmd(
+    root: RootOption = None,
+    full: Annotated[bool, typer.Option("--full", help="Ignore cached hashes and parses.")] = False,
+    as_json: JsonOption = False,
+) -> None:
+    """Build the full index into .aicontext/."""
+    from codeatlas.lifecycle import scan
+
+    _print_scan(scan(_root(root), full=full), as_json)
+
+
+@app.command("update")
+@handle_errors
+def update_cmd(
+    paths: Annotated[
+        list[str] | None,
+        typer.Argument(help="Files known to have changed (same as --files; any number)."),
+    ] = None,
+    files: Annotated[
+        list[str] | None,
+        typer.Option("--files", help="A file known to have changed. Repeatable; extra paths work."),
+    ] = None,
+    root: RootOption = None,
+    quiet: QuietOption = False,
+    as_json: JsonOption = False,
+) -> None:
+    """Incrementally update the index: re-parse only changed files.
+
+    `codeatlas update a.py b.py`, `codeatlas update --files a.py b.py` and
+    `codeatlas update --files a.py --files b.py` are all accepted.
+    """
+    from codeatlas.lifecycle import update
+    from codeatlas.navigator.freshness import warm_caches
+
+    named = [*(files or []), *(paths or [])]
+    repo = _root(root)
+    result = update(repo, files=named or None)
+    if not result.skipped:
+        warm_caches(repo)
+    data = {
+        "skipped": result.skipped,
+        "changed": list(result.changed),
+        "added": list(result.added),
+        "deleted": list(result.deleted),
+        "reparsed": result.reparsed,
+        "rank_approx": bool(result.manifest.get("rank_approx")),
+    }
+    if as_json:
+        emit_json(data)
+    elif not quiet:
+        if result.skipped:
+            emit("Index already up to date.")
+        else:
+            emit(
+                f"Updated: {len(result.changed)} changed, {len(result.added)} added, "
+                f"{len(result.deleted)} deleted · {result.reparsed} re-parsed"
+            )
+
+
+def _status_line(report: Any) -> str:
+    if report.state is RepoState.NOT_INITIALIZED:
+        return "not initialized"
+    if not report.indexed:
+        return f"{report.state.value} · no index yet (run `codeatlas scan`)"
+    fresh = "index fresh" if report.fresh else f"{report.changed} files changed since last update"
+    return f"{report.state.value} · {fresh}"
+
+
+@app.command()
+@handle_errors
+def status(root: RootOption = None, as_json: JsonOption = False) -> None:
+    """Show consent state, index freshness, drift, and audit summary."""
+    from codeatlas.status import compute_status
+
+    report = compute_status(_root(root))
+    if as_json:
+        emit_json(report.to_dict())
+        return
+    out.print(_status_line(report))
+    if report.indexed:
+        s = report.stats
+        out.print(
+            f"last update {report.last_scan} · {s.get('files', 0)} files · "
+            f"{s.get('symbols', 0)} symbols · {s.get('test_files', 0)} test files"
+        )
+    for label, items in (
+        ("added", report.added),
+        ("modified", report.modified),
+        ("deleted", report.deleted),
+    ):
+        for path in items[:10]:
+            out.print(f"  {label:<8} {path}")
+        if len(items) > 10:
+            out.print(f"  … and {len(items) - 10} more {label}")
+    if report.stale_sections:
+        out.print(
+            "stale sections: " + ", ".join(report.stale_sections) + " (run the codeatlas-refresh skill)"
+        )
+    if report.audit:
+        a = report.audit
+        out.print(
+            f"audit: {a['open']} open findings"
+            + (f" · last report {a['last_report']}" if a.get("last_report") else "")
+        )
+
+
+# --- navigator -------------------------------------------------------------------
+
+BudgetOption = Annotated[int, typer.Option("--budget", min=100, help="Token budget for the pack.")]
+
+
+def _store(root: Path | None) -> Any:
+    from codeatlas.navigator.freshness import refresh_if_stale
+    from codeatlas.navigator.store import IndexStore
+
+    repo = _root(root)
+    refresh_if_stale(repo)  # answer from the working tree, whether or not hooks ran
+    return IndexStore.open(repo)
+
+
+@app.command()
+@handle_errors
+def brief(
+    root: RootOption = None,
+    full: Annotated[
+        bool, typer.Option("--full", help="The whole AGENTS.md, not the compact session brief.")
+    ] = False,
+    as_json: JsonOption = False,
+) -> None:
+    """Print the compact session brief (or the full AGENTS.md) plus a one-line freshness status."""
+    from codeatlas.navigator import api as nav
+    from codeatlas.navigator import render
+
+    _output(nav.op_brief(_root(root), full=full), as_json, render.render_brief)
+
+
+@app.command("locate")
+@handle_errors
+def locate_cmd(
+    name: Annotated[str, typer.Argument(help="Symbol, qualified suffix, module, or file name.")],
+    root: RootOption = None,
+    limit: Annotated[int, typer.Option("--limit", min=1)] = 10,
+    as_json: JsonOption = False,
+) -> None:
+    """Resolve a name to candidates with file:lines (exact → suffix → fuzzy)."""
+    from codeatlas.navigator import api as nav
+    from codeatlas.navigator import render
+
+    _output(nav.op_locate(_store(root), name, limit), as_json, render.render_locate)
+
+
+@app.command()
+@handle_errors
+def context(
+    target: Annotated[str, typer.Argument(help="Symbol id, file, file:line, module, or route.")],
+    root: RootOption = None,
+    budget: BudgetOption = 2000,
+    depth: Annotated[int, typer.Option("--depth", min=1, max=2)] = 1,
+    with_source: Annotated[
+        bool, typer.Option("--with-source", help="Inline the target body.")
+    ] = False,
+    as_json: JsonOption = False,
+) -> None:
+    """Build a context pack: location, callers, callees, tests, risk, and a read list."""
+    from codeatlas.navigator import api as nav
+    from codeatlas.navigator import render
+
+    data = nav.op_context(_store(root), target, budget=budget, depth=depth, with_source=with_source)
+    _output(data, as_json, render.render_context)
+
+
+@app.command("impact")
+@handle_errors
+def impact_cmd(
+    target: Annotated[
+        str | None, typer.Argument(help="Symbol id, file, file:line, module, or route.")
+    ] = None,
+    root: RootOption = None,
+    depth: Annotated[int, typer.Option("--depth", min=1, max=6)] = 3,
+    as_json: JsonOption = False,
+    changed: Annotated[
+        bool, typer.Option("--changed", help="Map staged and unstaged changes (read-only).")
+    ] = False,
+    budget: Annotated[int, typer.Option("--budget", min=128, max=32000)] = 1200,
+) -> None:
+    """Blast radius: what could break if the target changes, and which tests to run."""
+    from codeatlas.navigator import api as nav
+    from codeatlas.navigator import render
+
+    if changed:
+        if target is not None:
+            raise UserError("choose a target or --changed")
+        from codeatlas.navigator.changed_impact import changed_impact, render_changed_impact
+        from codeatlas.navigator.store import IndexStore
+
+        # No freshness refresh: this review operation never updates the index.
+        store = IndexStore.open(_root(root))
+        try:
+            result = changed_impact(store, budget)
+        finally:
+            store.close()
+        _output(result, as_json, render_changed_impact)
+        return
+    if target is None:
+        raise UserError("give a target or --changed")
+    _output(nav.op_impact(_store(root), target, depth), as_json, render.render_impact)
+
+
+@app.command()
+@handle_errors
+def knowledge(
+    root: RootOption = None,
+    budget: Annotated[int, typer.Option("--budget", min=128, max=32000)] = 600,
+    as_json: JsonOption = False,
+) -> None:
+    """Inspect persistent project knowledge; retrieve source only for a task."""
+    from codeatlas.navigator.api import op_knowledge
+    from codeatlas.navigator.knowledge import render_knowledge
+
+    store = _store(root)
+    try:
+        _output(op_knowledge(store, budget), as_json, render_knowledge)
+    finally:
+        store.close()
+
+
+@app.command()
+@handle_errors
+def task(
+    query: Annotated[str, typer.Argument(help="The request, a symbol name, or a file path.")],
+    root: RootOption = None,
+    budget: Annotated[int | None, typer.Option("--budget", min=128, max=32000)] = None,
+    mode: Annotated[
+        str,
+        typer.Option(
+            "--mode",
+            help="auto | overview (signatures/map) | code (edit context) | verify (after editing: sites that still match)",
+        ),
+    ] = "auto",
+    session: Annotated[
+        str | None,
+        typer.Option(
+            "--session",
+            help="Remember returned code in this session; repeats become one-line references.",
+        ),
+    ] = None,
+    detail: Annotated[
+        str,
+        typer.Option("--detail", help="full | brief (sites and tests only, at most 800 tokens)."),
+    ] = "full",
+    as_json: JsonOption = False,
+) -> None:
+    """One call: the matching code, every exact string match, call sites, tests and impact."""
+    from codeatlas.navigator import daemon
+    from codeatlas.navigator.taskrun import open_fresh_store, run_task
+
+    repo = _root(root)
+    request = {
+        "op": "task",
+        "query": query,
+        "budget": budget,
+        "mode": mode,
+        "session": session if session is not None else _defaults().session,
+        "json": as_json,
+        "detail": detail,
+    }
+    answer = daemon.ask(repo, request)  # a warm process, when one is running
+    if answer is not None:
+        emit(answer)
+        return
+    store = open_fresh_store(repo)
+    try:
+        emit(run_task(repo, store, query, budget, mode, request["session"], as_json, detail))  # type: ignore[arg-type]
+    finally:
+        store.close()
+    daemon.ensure_running(repo)  # the next call is answered by a warm process
+
+
+@app.command("find")
+@handle_errors
+def find_cmd(
+    patterns: Annotated[list[str], typer.Argument(help="One or more texts to find (substring).")],
+    root: RootOption = None,
+    regex: Annotated[
+        bool, typer.Option("--regex", help="Treat patterns as regular expressions.")
+    ] = False,
+    ignore_case: Annotated[bool, typer.Option("-i", "--ignore-case")] = False,
+    glob: Annotated[
+        list[str] | None, typer.Option("--glob", help="Only files matching this glob (repeatable).")
+    ] = None,
+    budget: Annotated[int, typer.Option("--budget", min=128, max=32000)] = 1500,
+    as_json: JsonOption = False,
+) -> None:
+    """Several searches in one call, grouped by file, within a token budget."""
+    from codeatlas.navigator.find import render_find, run_find
+
+    store = _store(root)
+    try:
+        pack = run_find(store, patterns, regex, ignore_case, glob, budget)
+    finally:
+        store.close()
+    _output(pack, as_json, render_find)
+
+
+@app.command("diff")
+@handle_errors
+def diff_cmd(
+    query: Annotated[
+        str, typer.Argument(help='The request, e.g. "change the limit from 23 to 25".')
+    ],
+    root: RootOption = None,
+    show: Annotated[bool, typer.Option("--show", help="Print the patch text as well.")] = False,
+    as_json: JsonOption = False,
+) -> None:
+    """Write a checked patch for an explicit old -> new change at its exhaustive sites.
+
+    The patch goes under .aicontext/cache/patches/; apply it with the printed git command.
+    CODEATLAS never edits your files itself."""
+    from codeatlas.navigator.patchcmd import patch_for_request
+
+    store = _store(root)
+    try:
+        result = patch_for_request(store, query)
+        text = (
+            (store.root / result["patch"]["path"]).read_text(encoding="utf-8")
+            if show and result.get("patch")
+            else ""
+        )
+    finally:
+        store.close()
+    if as_json:
+        emit_json(result)
+        return
+    if result.get("patch"):
+        patch = result["patch"]
+        emit(
+            f"Patch: {patch['old']} -> {patch['new']} at {patch['sites']} sites in {patch['files']} files.\n"
+            f"Apply: {result['apply']}"
+        )
+        if show:
+            emit(text)
+    else:
+        emit(f"No patch: {result['reason']}")
+
+
+@app.command()
+@handle_errors
+def note(
+    text: Annotated[str, typer.Argument(help="What changed, what is left, what to watch for.")],
+    root: RootOption = None,
+    session: Annotated[
+        str | None, typer.Option("--session", help="Session id the note belongs to.")
+    ] = None,
+) -> None:
+    """Leave a short handoff note for the next agent session (local, gitignored)."""
+    from codeatlas.navigator.session import session_id
+    from codeatlas.writers.worklog import record_note
+
+    record_note(
+        _root(root), session_id(session if session is not None else _defaults().session), text
+    )
+    emit("Noted for the next session.")
+
+
+@app.command()
+@handle_errors
+def recall(
+    query: Annotated[str | None, typer.Argument(help="Only sessions about this.")] = None,
+    root: RootOption = None,
+    limit: Annotated[int, typer.Option("--limit", min=1, max=50)] = 5,
+    as_json: JsonOption = False,
+) -> None:
+    """What earlier sessions asked, edited and noted (from the local work log)."""
+    from codeatlas.navigator.recall import recall as recall_sessions
+    from codeatlas.navigator.recall import render_recall
+
+    _output(recall_sessions(_root(root), query, limit), as_json, render_recall)
+
+
+@app.command()
+@handle_errors
+def search(
+    query: Annotated[str, typer.Argument(help="Free text: names, docstrings, paths, routes.")],
+    root: RootOption = None,
+    limit: Annotated[int, typer.Option("--limit", min=1, max=100)] = 10,
+    semantic: Annotated[
+        bool,
+        typer.Option("--semantic", help="Blend in local embeddings (needs codeatlas-ctx\\[semantic])."),
+    ] = False,
+    as_json: JsonOption = False,
+) -> None:
+    """Ranked free-text search over the index (BM25, fully local)."""
+    from codeatlas.navigator import api as nav
+    from codeatlas.navigator import render
+
+    _output(
+        nav.op_search(_store(root), query, limit, semantic=semantic), as_json, render.render_search
+    )
+
+
+@app.command("trace")
+@handle_errors
+def trace_command(
+    source: Annotated[str, typer.Argument(help="Source symbol or module.")],
+    target: Annotated[str, typer.Argument(help="Destination symbol or module.")],
+    root: RootOption = None,
+    depth: Annotated[int, typer.Option("--depth", min=1, max=8)] = 4,
+    max_nodes: Annotated[int, typer.Option("--max-nodes", min=2, max=1024)] = 128,
+    as_json: JsonOption = False,
+) -> None:
+    """Explain a bounded directed static call/import path."""
+    from codeatlas.navigator.trace import render_trace, trace_path
+
+    store = _store(root)
+    try:
+        _output(trace_path(store, source, target, depth, max_nodes), as_json, render_trace)
+    finally:
+        store.close()
+
+
+@app.command()
+@handle_errors
+def module(
+    name: Annotated[str, typer.Argument(help="Module or package name.")],
+    root: RootOption = None,
+    as_json: JsonOption = False,
+) -> None:
+    """Show a module summary from .aicontext/modules/."""
+    from codeatlas.navigator import api as nav
+
+    _output(nav.op_module(_store(root), name), as_json, lambda d: str(d["text"]).rstrip())
+
+
+# --- narrator ----------------------------------------------------------------------
+
+
+@refresh_app.callback()
+@handle_errors
+def refresh_default(
+    ctx: typer.Context,
+    top: Annotated[int | None, typer.Option("--top", min=1, max=100)] = None,
+    root: RootOption = None,
+) -> None:
+    """Prepare the highest-value module summaries for the host agent to write."""
+    if ctx.invoked_subcommand is None:
+        from codeatlas.narrator import refresh_prepare
+
+        emit_json(refresh_prepare(_root(root), top=top))
+    elif top is not None:
+        raise UserError("use codeatlas refresh --top N without a subcommand")
+
+
+@refresh_app.command("prepare")
+@handle_errors
+def refresh_prepare_cmd(
+    sections: Annotated[
+        list[str] | None, typer.Option("--sections", help="Sections to prepare.")
+    ] = None,
+    root: RootOption = None,
+    top: Annotated[int | None, typer.Option("--top", min=1, max=100)] = None,
+) -> None:
+    """Emit the refresh packet (JSON) for stale or requested sections."""
+    from codeatlas.narrator import refresh_prepare
+
+    emit_json(refresh_prepare(_root(root), sections, top=top))
+
+
+@refresh_app.command("commit")
+@handle_errors
+def refresh_commit_cmd(
+    section: Annotated[
+        str, typer.Argument(help="purpose | architecture | conventions | modules/<name>")
+    ],
+    file: Annotated[Path, typer.Option("--file", help="Markdown file with the new section text.")],
+    root: RootOption = None,
+    as_json: JsonOption = False,
+) -> None:
+    """Validate and write one narrative section, resetting its drift."""
+    from codeatlas.narrator import refresh_commit
+
+    text = file.read_text(encoding="utf-8")
+    result = refresh_commit(_root(root), section, text)
+    if as_json:
+        emit_json(result)
+    else:
+        emit(f"Refreshed '{section}' (~{result['tokens']} tokens); drift reset.")
+
+
+# --- auditor -----------------------------------------------------------------------
+
+
+@audit_app.command("plan")
+@handle_errors
+def audit_plan_cmd(
+    scope: Annotated[str, typer.Option("--scope", help="all | changed | <path>")] = "all",
+    since: Annotated[
+        str | None, typer.Option("--since", help="Git ref for --scope changed.")
+    ] = None,
+    depth: Annotated[str, typer.Option("--depth", help="quick | standard | deep")] = "standard",
+    root: RootOption = None,
+    as_json: JsonOption = False,
+) -> None:
+    """Write audit/audit_plan.json: toolchain, prioritized targets, smells, and more."""
+    from codeatlas.audit import build_plan
+
+    plan = build_plan(_root(root), scope=scope, since=since, depth=depth)
+    if as_json:
+        emit_json(plan)
+        return
+    emit(f"Audit plan written to {AICONTEXT}/audit/audit_plan.json")
+    emit(
+        f"scope {scope} · depth {depth} · {len(plan['targets'])} targets · {len(plan['smells'])} smells · "
+        f"{len(plan['untested'])} untested · {len(plan['reverify'])} to re-verify"
+    )
+    for t in plan["toolchain"]:
+        emit(f"  {t['kind']:<9} {t['command']}  ({t['detected_from']})")
+    for t in plan["targets"][:10]:
+        emit(f"  {t['score']:>6.2f}  {t['target']}  — {'; '.join(t['reasons'][:3])}")
+
+
+@audit_app.command("record")
+@handle_errors
+def audit_record_cmd(
+    json_file: Annotated[str, typer.Option("--json", help="Finding JSON file, or '-' for stdin.")],
+    root: RootOption = None,
+) -> None:
+    """Validate and record one finding (or a JSON list of findings)."""
+    from codeatlas.audit import record_finding
+
+    raw = sys.stdin.read() if json_file == "-" else Path(json_file).read_text(encoding="utf-8")
+    try:
+        data = json.loads(raw)
+    except ValueError as exc:
+        raise UserError(f"finding is not valid JSON: {exc}") from exc
+    items = data if isinstance(data, list) else [data]
+    results = [record_finding(_root(root), item) for item in items]
+    emit_json(results if isinstance(data, list) else results[0])
+
+
+@audit_app.command("update")
+@handle_errors
+def audit_update_cmd(
+    finding_id: Annotated[str, typer.Argument(help="Finding id, e.g. F-012.")],
+    status_: Annotated[
+        str, typer.Option("--status", help="open | fixed | wontfix | false_positive")
+    ],
+    note: Annotated[str | None, typer.Option("--note")] = None,
+    root: RootOption = None,
+    as_json: JsonOption = False,
+) -> None:
+    """Change a finding's lifecycle status."""
+    from codeatlas.audit import update_status
+
+    result = update_status(_root(root), finding_id, status_, note)
+    if as_json:
+        emit_json(result)
+    else:
+        emit(f"{finding_id} is now {result['status']}.")
+
+
+@audit_app.command("report")
+@handle_errors
+def audit_report_cmd(root: RootOption = None, as_json: JsonOption = False) -> None:
+    """Render audit/REPORT.md (with new/fixed/persisting vs. the last audit) and archive it."""
+    from codeatlas.audit import build_report
+
+    result = build_report(_root(root))
+    if as_json:
+        emit_json(result)
+    else:
+        sev = ", ".join(f"{n} {s}" for s, n in result["open_by_severity"].items()) or "none"
+        emit(
+            f"{result['report']}: {result['open']} open ({sev}) · {len(result['new'])} new · "
+            f"{len(result['fixed'])} fixed · {len(result['persisting'])} persisting"
+        )
+
+
+# --- visualizer --------------------------------------------------------------------
+
+graph_app = typer.Typer(help="Export the code graph (HTML, Obsidian, Mermaid, DOT, GraphML, JSON).")
+app.add_typer(graph_app, name="graph")
+
+
+@app.command()
+@handle_errors
+def view(
+    root: RootOption = None,
+    focus: Annotated[
+        str | None, typer.Option("--focus", help="Open on the local graph of a target.")
+    ] = None,
+    depth: Annotated[int, typer.Option("--depth", min=1, max=4)] = 2,
+    port: Annotated[
+        int, typer.Option("--port", help="Port on 127.0.0.1 (default: random free port).")
+    ] = 0,
+    no_open: Annotated[
+        bool, typer.Option("--no-open", help="Print the URL instead of opening a browser.")
+    ] = False,
+) -> None:
+    """Open the interactive code graph in your browser (local server on 127.0.0.1)."""
+    import webbrowser
+
+    from codeatlas.viewer.server import ViewerServer
+
+    server = ViewerServer(_root(root), port=port)
+    url = server.url(focus, depth if focus else None)
+    emit(f"CODEATLAS graph: {url}")
+    emit("Press Ctrl+C to stop.")
+    if not no_open:
+        webbrowser.open(url)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        emit("Stopped.")
+
+
+@graph_app.command("export")
+@handle_errors
+def graph_export(
+    html: Annotated[Path | None, typer.Option("--html", help="Self-contained HTML file.")] = None,
+    obsidian: Annotated[
+        Path | None, typer.Option("--obsidian", help="Obsidian vault directory.")
+    ] = None,
+    mermaid: Annotated[
+        bool, typer.Option("--mermaid", help="Mermaid diagram (stdout or --out).")
+    ] = False,
+    dot: Annotated[bool, typer.Option("--dot", help="Graphviz DOT (stdout or --out).")] = False,
+    graphml: Annotated[bool, typer.Option("--graphml", help="GraphML for Gephi/yEd.")] = False,
+    as_json: Annotated[bool, typer.Option("--json", help="Nodes and edges as JSON.")] = False,
+    around: Annotated[
+        str | None, typer.Option("--around", help="Only the neighbourhood of a target.")
+    ] = None,
+    depth: Annotated[int, typer.Option("--depth", min=1, max=4)] = 1,
+    level: Annotated[str, typer.Option("--level", help="package | file | symbol")] = "file",
+    layer: Annotated[
+        str, typer.Option("--layer", help="import | call | tests | cochange")
+    ] = "import",
+    symbols: Annotated[
+        bool, typer.Option("--symbols", help="HTML/Obsidian: include symbol-level nodes.")
+    ] = False,
+    graph_colors: Annotated[
+        bool, typer.Option("--with-graph-colors", help="Obsidian: add risk color groups.")
+    ] = False,
+    out: Annotated[Path | None, typer.Option("--out", help="Output file for text formats.")] = None,
+    root: RootOption = None,
+) -> None:
+    """Export the graph. Exactly one format flag is required."""
+    chosen = [
+        name
+        for name, on in (
+            ("html", html),
+            ("obsidian", obsidian),
+            ("mermaid", mermaid),
+            ("dot", dot),
+            ("graphml", graphml),
+            ("json", as_json),
+        )
+        if on
+    ]
+    if len(chosen) != 1:
+        raise UserError(
+            "choose exactly one of --html, --obsidian, --mermaid, --dot, --graphml, --json"
+        )
+    repo = _root(root)
+    if html is not None:
+        from codeatlas.writers.graph_export import export_html
+
+        result = export_html(repo, html, include_symbols=symbols)
+        emit(
+            f"Wrote {result['path']} ({result['bytes'] / 1_000_000:.2f} MB); open it in any browser, offline."
+        )
+        return
+    if obsidian is not None:
+        from codeatlas.writers.obsidian import export_obsidian
+
+        result = export_obsidian(repo, obsidian, include_symbols=symbols, graph_colors=graph_colors)
+        emit(
+            f"Wrote {result['notes']} notes to {obsidian} ({result['removed']} stale notes removed)."
+        )
+        return
+    from codeatlas.writers.graph_export import export_diagram
+
+    text = export_diagram(
+        repo, chosen[0], out, level=level, layer=layer, around=around, depth=depth
+    )
+    if out is None:
+        typer.echo(text, nl=False)
+    else:
+        emit(f"Wrote {out}")
+
+
+# --- decisions and maintenance -------------------------------------------------------
+
+decision_app = typer.Typer(
+    help="Architecture decisions in .aicontext/decisions/ (codeatlas-decisions skill)."
+)
+app.add_typer(decision_app, name="decision")
+
+
+@decision_app.command("add")
+@handle_errors
+def decision_add(
+    title: Annotated[str, typer.Option("--title", help="Short statement of the decision.")],
+    context: Annotated[str, typer.Option("--context", help="The problem and forces at play.")],
+    decision: Annotated[str, typer.Option("--decision", help="What was decided, and why.")],
+    consequences: Annotated[
+        str, typer.Option("--consequences", help="Trade-offs and follow-ups.")
+    ] = "",
+    status_: Annotated[
+        str, typer.Option("--status", help="proposed | accepted | superseded | deprecated")
+    ] = "accepted",
+    symbols: Annotated[
+        list[str] | None, typer.Option("--symbol", help="Related symbol id (repeatable).")
+    ] = None,
+    supersedes: Annotated[
+        str | None, typer.Option("--supersedes", help="Id of a decision this replaces.")
+    ] = None,
+    root: RootOption = None,
+) -> None:
+    """Record an architecture decision."""
+    from codeatlas.writers.decisions import add_decision
+
+    result = add_decision(
+        _root(root), title, context, decision, consequences, status_, symbols, supersedes
+    )
+    emit(f"Recorded decision {result['id']}: {result['title']} ({result['file']})")
+
+
+@decision_app.command("list")
+@handle_errors
+def decision_list(root: RootOption = None, as_json: JsonOption = False) -> None:
+    """List recorded decisions."""
+    from codeatlas.writers.decisions import list_decisions
+
+    items = [{k: v for k, v in d.items() if k != "text"} for d in list_decisions(_root(root))]
+    if as_json:
+        emit_json({"decisions": items})
+        return
+    if not items:
+        emit("No decisions recorded yet.")
+    for d in items:
+        emit(f"{d['id']}  [{d['status']}]  {d['title']}  ({d['date']})")
+
+
+@decision_app.command("show")
+@handle_errors
+def decision_show(
+    ident: Annotated[str, typer.Argument(help="Decision id, e.g. 0003.")], root: RootOption = None
+) -> None:
+    """Print one decision."""
+    from codeatlas.writers.decisions import get_decision
+
+    emit(get_decision(_root(root), ident)["text"].rstrip())
+
+
+@decision_app.command("search")
+@handle_errors
+def decision_search(
+    query: Annotated[str, typer.Argument(help="Decision topic or rationale.")],
+    root: RootOption = None,
+    limit: Annotated[int, typer.Option("--limit", min=1, max=50)] = 10,
+    as_json: JsonOption = False,
+) -> None:
+    """Search compact decision records; expand selected ids with decision show."""
+    from codeatlas.navigator.decision_memory import search_decisions
+
+    result = search_decisions(_root(root), query, limit)
+    if as_json:
+        emit_json(result)
+    else:
+        for item in result["decisions"]:
+            emit(f"{item['id']} [{item['validity']}] {item['title']}")
+        emit(result["next"])
+
+
+@app.command()
+@handle_errors
+def watch(
+    root: RootOption = None,
+    interval: Annotated[
+        float, typer.Option("--interval", min=0.2, help="Seconds between checks.")
+    ] = 1.0,
+) -> None:
+    """Keep the index fresh while you work (for editors/agents without hooks). Ctrl+C stops."""
+    from codeatlas.maintenance import watch as run_watch
+
+    repo = _root(root)
+    emit(f"Watching {repo.as_posix()} (Ctrl+C to stop)…")
+
+    def report(result: Any) -> None:
+        emit(
+            f"updated: {len(result.changed)} changed, {len(result.added)} added, {len(result.deleted)} deleted"
+        )
+
+    try:
+        run_watch(repo, interval=interval, on_update=report)
+    except KeyboardInterrupt:
+        emit("Stopped.")
+
+
+@app.command()
+@handle_errors
+def doctor(
+    root: RootOption = None,
+    as_json: JsonOption = False,
+    session: Annotated[
+        str | None,
+        typer.Option(
+            "--session",
+            help="Report whether CODEATLAS was used in this agent session (an id, or `latest`).",
+        ),
+    ] = None,
+) -> None:
+    """Diagnose the setup: install, index, consent, hooks, MCP, git, parsers, viewer."""
+    from codeatlas.maintenance import doctor as run_doctor
+    from codeatlas.maintenance import session_report
+
+    checks = (
+        session_report(_root(root), session) if session is not None else run_doctor(_root(root))
+    )
+    if as_json:
+        emit_json({"checks": [c.to_dict() for c in checks]})
+    else:
+        marks = {"ok": "[green]✓[/green]", "warn": "[yellow]![/yellow]", "fail": "[red]✗[/red]"}
+        for c in checks:
+            out.print(f" {marks[c.status]} {c.name:<16} ", end="")
+            out.print(c.detail, markup=False, highlight=False)
+    if any(c.status == "fail" for c in checks):
+        raise typer.Exit(1)
+
+
+@app.command("filter", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+def filter_cmd(
+    ctx: typer.Context,
+    root: RootOption = None,
+    show: Annotated[str | None, typer.Option("--show")] = None,
+    grep: Annotated[
+        str | None, typer.Option("--grep", help="Literal text to find in saved output.")
+    ] = None,
+    around: Annotated[int | None, typer.Option("--around")] = None,
+    context: Annotated[int, typer.Option("-C")] = 3,
+    tail: Annotated[int | None, typer.Option("--tail")] = None,
+    cap: Annotated[int, typer.Option("--cap")] = 12000,
+) -> None:
+    """Run a command and print only what matters of its output (failures, summaries).
+
+    Usage: codeatlas filter -- <command>. The full output is saved under .aicontext/cache/tee/ and
+    its path is printed last; the exit status is the command's. Off unless CODEATLAS is enabled for
+    you in this repo: otherwise the command's output is printed unchanged."""
+    from codeatlas.consent import RepoState
+    from codeatlas.hooks.runner import _state
+    from codeatlas.outputfilter import run_filtered, show_tee
+
+    command = list(ctx.args)
+    repo = _root(root)
+    if show is not None:
+        if command:
+            raise UserError("--show cannot be combined with a command")
+        sys.stdout.buffer.write(
+            show_tee(
+                repo, show, grep=grep, around=around, context=context, tail=tail, cap=cap
+            ).encode("utf-8")
+        )
+        return
+    if any(value is not None for value in (grep, around, tail)):
+        raise UserError("saved-output queries require --show <id>")
+    if not command:
+        raise UserError("give a command: codeatlas filter -- pytest -q")
+    if _state(repo) is not RepoState.ENABLED:
+        import subprocess
+
+        raise typer.Exit(
+            subprocess.run(
+                command[0] if len(command) == 1 else command, shell=len(command) == 1
+            ).returncode
+        )
+    raise typer.Exit(run_filtered(repo, command))
+
+
+@app.command()
+@handle_errors
+def migrate(root: RootOption = None, as_json: JsonOption = False) -> None:
+    """Upgrade .aicontext/ to this CODEATLAS version's schema and rebuild the index."""
+    from codeatlas.maintenance import migrate as run_migrate
+
+    result = run_migrate(_root(root))
+    if as_json:
+        emit_json(result)
+    else:
+        emit(
+            f"Index is at schema {result['to']} (codeatlas {result['codeatlas_version']}); artifacts rebuilt."
+        )
+
+
+# --- hooks and MCP -----------------------------------------------------------------
+
+
+FormatOption = Annotated[
+    str, typer.Option("--format", help="How to print context: text | json | cursor.")
+]
+EventOption = Annotated[
+    str | None, typer.Option("--event", help="Event name for --format json (default: the hook's).")
+]
+
+
+def _run_hook(name: str, fmt: str, event: str | None) -> None:
+    from codeatlas.hooks.entry import run_hook
+
+    args = ["--format", fmt]
+    if event:
+        args += ["--event", event]
+    run_hook(name, args)
+
+
+@hook_app.command("session-start")
+def hook_session_start(fmt: FormatOption = "text", event: EventOption = None) -> None:
+    """Catch up on outside changes, then print the compact brief into the agent's context."""
+    _run_hook("session-start", fmt, event)
+
+
+@hook_app.command("user-prompt")
+def hook_user_prompt(fmt: FormatOption = "text", event: EventOption = None) -> None:
+    """Look up the user's request in the index and add the matching code to the prompt."""
+    _run_hook("user-prompt", fmt, event)
+
+
+@hook_app.command("post-edit")
+def hook_post_edit() -> None:
+    """Update the index for the file the agent just edited. Silent; always exits 0."""
+    _run_hook("post-edit", "text", None)
+
+
+@app.command("mcp")
+@handle_errors
+def mcp_cmd(
+    root: RootOption = None,
+    profile: Annotated[
+        str | None,
+        typer.Option(
+            "--profile",
+            help="lean (default: codeatlas_task only), standard (adds context, impact, status) or full.",
+        ),
+    ] = None,
+) -> None:
+    """Run the MCP server over stdio (started by your agent from .mcp.json)."""
+    from codeatlas.mcp.server import PROFILES, run
+
+    if profile is not None and profile.lower() not in PROFILES:
+        raise UserError(f"--profile must be one of: {', '.join(PROFILES)}")
+    run(_root(root), profile)
+
+
+def main() -> None:
+    # Windows consoles default to a legacy code page; CODEATLAS output is UTF-8.
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            with contextlib.suppress(OSError, ValueError):
+                reconfigure(encoding="utf-8")
+    import click
+
+    try:
+        # `windows_expand_args=False`: click would otherwise expand `*` in arguments itself on
+        # Windows (a `--glob 'backend/*'` became a list of files), which a shell never does for
+        # quoted text. Returns an `Exit` code rather than raising it.
+        code = app(standalone_mode=False, windows_expand_args=False)
+    except click.exceptions.Exit as exc:
+        sys.exit(exc.exit_code)
+    except click.exceptions.Abort:
+        sys.exit(130)
+    except click.ClickException as exc:
+        exc.show()
+        sys.exit(1)  # usage mistakes are user errors (1); 2 is reserved for "index missing"
+    sys.exit(code if isinstance(code, int) else 0)
