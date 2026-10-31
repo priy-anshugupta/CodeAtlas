@@ -1,0 +1,455 @@
+"""`codeatlas doctor`, `codeatlas migrate`, and `codeatlas watch`."""
+
+from __future__ import annotations
+
+import json
+import shutil
+import sys
+import time
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from codeatlas import SCHEMA_VERSION, __version__
+from codeatlas.consent import RepoState, repo_state
+from codeatlas.core.errors import NotEnabledError, UserError
+from codeatlas.core.paths import AICONTEXT
+from codeatlas.writers.manifest import load_manifest, text_hash
+
+SCHEMAS = Path(__file__).resolve().parent / "schemas"
+
+
+@dataclass(frozen=True)
+class Check:
+    name: str
+    status: str  # "ok" | "warn" | "fail"
+    detail: str
+
+    def to_dict(self) -> dict[str, str]:
+        return {"name": self.name, "status": self.status, "detail": self.detail}
+
+
+def _version_tuple(v: str) -> tuple[int, ...]:
+    return tuple(int(p) for p in v.split(".") if p.isdigit())
+
+
+def doctor(root: Path) -> list[Check]:
+    checks: list[Check] = []
+
+    def add(name: str, ok: bool | None, detail: str, warn_only: bool = False) -> None:
+        status = "ok" if ok else ("warn" if warn_only or ok is None else "fail")
+        checks.append(Check(name, status, detail))
+
+    add("python", sys.version_info >= (3, 10), f"{sys.version.split()[0]} ({sys.platform})")
+    add("codeatlas", True, __version__)
+    exe = shutil.which("codeatlas")
+    add("codeatlas on PATH", exe is not None, exe or "not found: hooks and the MCP server call `codeatlas`")
+
+    manifest = load_manifest(root)
+    if manifest is None:
+        add(
+            "initialized",
+            None,
+            "not initialized here (run `codeatlas init` if you want CODEATLAS in this repo)",
+        )
+        return checks
+    add("initialized", True, (root / AICONTEXT).as_posix())
+    from codeatlas.config import load_config
+    from codeatlas.hooks.formats import MAX_CONTEXT_CHARS
+
+    configured_budget = load_config(root).extra.get("prompt_budget", 2000)
+    from codeatlas.outputfilter import saved_saving
+
+    saving = saved_saving(root)
+    detail = (
+        f"saved outputs are {saving[1]:.1f}% shorter across {saving[0]} logs; "
+        if saving
+        else "no saved-output measurements yet; "
+    )
+    add("shell output", True, detail + "run long test/build/log commands as codeatlas filter -- <cmd>")
+    from codeatlas.cache_cleanup import cache_size
+
+    cache_files, cache_bytes = cache_size(root)
+    add(
+        "cache size",
+        True,
+        f"{cache_bytes} bytes in {cache_files} files; prune saved logs with codeatlas cache gc",
+    )
+    from codeatlas.narrator.refresh import _current, all_sections
+    from codeatlas.navigator.sanitize import strip_hidden
+
+    narratives = [section for section in all_sections(root) if section.startswith("modules/")]
+    filled = sum(bool(_current(root, section)) for section in narratives)
+    add(
+        "module narratives",
+        True,
+        f"{filled}/{len(narratives)} filled ({100 * filled / max(1, len(narratives)):.0f}%)",
+    )
+
+    hidden = []
+    for relative in sorted(manifest.get("files", {})):
+        path = root / relative
+        if not path.resolve().is_relative_to(root.resolve()) or path.is_symlink():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+            if strip_hidden(text) != text:
+                hidden.append(relative)
+        except (OSError, UnicodeError):
+            continue
+    add(
+        "source Unicode",
+        not hidden,
+        "no hidden controls" if not hidden else "hidden controls: " + ", ".join(hidden[:5]),
+        warn_only=True,
+    )
+    if isinstance(configured_budget, int) and configured_budget * 4 > MAX_CONTEXT_CHARS:
+        add(
+            "hook context cap",
+            None,
+            f"prompt_budget={configured_budget} exceeds the {MAX_CONTEXT_CHARS}-character hook cap; retrieval is clamped",
+            warn_only=True,
+        )
+    try:
+        import jsonschema
+
+        jsonschema.validate(
+            manifest, json.loads((SCHEMAS / "manifest.schema.json").read_text(encoding="utf-8"))
+        )
+        add("manifest schema", True, f"schema {manifest.get('schema_version')}")
+    except Exception as exc:  # jsonschema.ValidationError and friends
+        add("manifest schema", False, f"invalid manifest: {str(exc).splitlines()[0]}")
+    broken = {
+        path: entry["parse_error"]
+        for path, entry in manifest.get("files", {}).items()
+        if isinstance(entry, dict) and entry.get("parse_error")
+    }
+    add(
+        "parse errors",
+        not broken,
+        f"{len(broken)} file(s) with syntax errors (symbols may be missing): "
+        + ", ".join(sorted(broken)[:5])
+        if broken
+        else "none",
+        warn_only=True,
+    )
+    if manifest.get("schema_version") != SCHEMA_VERSION or _version_tuple(
+        str(manifest.get("codeatlas_version", "0"))
+    ) < _version_tuple(__version__):
+        add(
+            "index version",
+            None,
+            f"built by codeatlas {manifest.get('codeatlas_version')}; run `codeatlas migrate`",
+            warn_only=True,
+        )
+    else:
+        add("index version", True, f"codeatlas {manifest.get('codeatlas_version')}")
+
+    state = repo_state(root, manifest.get("repo_id"))
+    add("consent", state is RepoState.ENABLED, state.value, warn_only=True)
+    if state is RepoState.ENABLED and manifest.get("last_scan"):
+        # Artifact/schema validity alone did not catch a real-repository cache
+        # build regression. Exercise the same query store that CLI/MCP require.
+        from codeatlas.navigator.store import IndexStore
+
+        try:
+            store = IndexStore.open(root)
+            try:
+                store.search("codeatlas", limit=1)
+            finally:
+                store.close()
+            add("query cache", True, "query store opens and search executes")
+        except Exception as exc:
+            add("query cache", False, f"query store failed: {type(exc).__name__}")
+    if manifest.get("last_scan"):
+        from codeatlas.status import compute_status
+
+        report = compute_status(root)
+        add(
+            "freshness",
+            report.fresh,
+            "index fresh"
+            if report.fresh
+            else f"{report.changed} files changed; run `codeatlas update`",
+            warn_only=True,
+        )
+    else:
+        add("freshness", False, "no index yet; run `codeatlas scan`", warn_only=True)
+
+    tampered = []
+    for rel, digest in manifest.get("artifacts", {}).items():
+        path = root / AICONTEXT / rel
+        if not path.is_file():
+            tampered.append(f"{rel} (missing)")
+        elif text_hash(path.read_text(encoding="utf-8")) != digest:
+            tampered.append(rel)
+    add(
+        "artifacts",
+        not tampered,
+        "match the manifest"
+        if not tampered
+        else "changed outside CODEATLAS: " + ", ".join(tampered[:5]),
+        warn_only=True,
+    )
+
+    from codeatlas.integrations.base import managed_block, read_text
+    from codeatlas.integrations.common import INSTRUCTION_BLOCK, INSTRUCTION_BLOCK_MCP
+
+    current = {INSTRUCTION_BLOCK.strip(), INSTRUCTION_BLOCK_MCP.strip()}
+    for rel in ("CLAUDE.md", "AGENTS.md", "GEMINI.md"):
+        block = managed_block(read_text(root / rel))
+        # A stale convention file costs more than none: agents follow it (arXiv 2608.16630).
+        if block is not None and block not in current:
+            add(
+                "instructions",
+                None,
+                f"the CODEATLAS block in {rel} is out of date: run `codeatlas init --yes` to refresh it",
+                warn_only=True,
+            )
+
+    from codeatlas.integrations import all_integrations
+
+    for integration in all_integrations():
+        for name, ok, detail in integration.status(root):
+            add(name, ok, detail, warn_only=True)
+    from codeatlas.launcher_status import launcher_status
+
+    launcher_ok, launcher_detail = launcher_status()
+    add("launcher", launcher_ok, launcher_detail, warn_only=True)
+    try:
+        import mcp  # noqa: F401
+
+        add("mcp sdk", True, "installed")
+    except ImportError:
+        add("mcp sdk", False, "the `mcp` package is missing; `codeatlas mcp` will not start")
+
+    from codeatlas.integrations.common import SKILL_NAMES, skill_text
+
+    stale_skills = [
+        n
+        for n in SKILL_NAMES
+        if (root / ".claude" / "skills" / n / "SKILL.md").is_file()
+        and (root / ".claude" / "skills" / n / "SKILL.md").read_text(encoding="utf-8")
+        != skill_text(n)
+    ]
+    if stale_skills:
+        add(
+            "skills",
+            None,
+            "outdated: " + ", ".join(stale_skills) + " (run `codeatlas init` to refresh)",
+            warn_only=True,
+        )
+
+    from codeatlas.health.git_intel import git_head
+
+    add(
+        "git",
+        git_head(root) is not None,
+        "history available" if git_head(root) else "no git history (churn/co-change disabled)",
+        warn_only=True,
+    )
+
+    languages = manifest.get("stats", {}).get("languages", {})
+    from codeatlas.lsp_status import language_server_status
+
+    lsp_ok, lsp_detail = language_server_status(root, languages)
+    add("language server", lsp_ok, lsp_detail, warn_only=True)
+    from codeatlas.parsing.base_parser import get_parser
+
+    unparsed = sorted(lang for lang in languages if get_parser(lang) is None)
+    fixable = [lang for lang in unparsed if lang in ("javascript", "typescript", "go", "java")]
+    if fixable:
+        add(
+            "languages",
+            None,
+            "no parser for " + ", ".join(fixable) + ": `pip install codeatlas-ctx[treesitter]`",
+            warn_only=True,
+        )
+    else:
+        parsed = sorted(lang for lang in languages if lang not in unparsed)
+        note = f" (counted, not parsed: {', '.join(unparsed)})" if unparsed else ""
+        add("languages", True, (", ".join(parsed) or "none") + note)
+
+    dist = Path(__file__).resolve().parent / "viewer_dist" / "index.html"
+    add(
+        "viewer bundle",
+        dist.is_file(),
+        "present" if dist.is_file() else "missing: `codeatlas view` and HTML export unavailable",
+        warn_only=True,
+    )
+
+    stray = list((root / AICONTEXT).rglob(".*.tmp"))
+    if stray:
+        add(
+            "temp files",
+            None,
+            f"{len(stray)} leftover temp files (removed on next update)",
+            warn_only=True,
+        )
+    log = root / AICONTEXT / "cache" / "hook.log"
+    if log.is_file() and log.stat().st_size:
+        tail = log.read_text(encoding="utf-8", errors="replace").strip().splitlines()[-1:]
+        add("hook log", None, f"recent hook error: {tail[0][:160]}" if tail else "", warn_only=True)
+    return checks
+
+
+# --- migrate ---------------------------------------------------------------------------------
+
+Migration = Callable[[Path, dict[str, Any]], dict[str, Any]]
+
+
+def _call_resolution_11(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
+    # Full scan below derives resolution from source; old confidence is not enough
+    # to reconstruct ambiguous name matches. Narrative artifacts remain in place.
+    return {**manifest, "schema_version": "1.1"}
+
+
+MIGRATIONS: dict[str, tuple[str, Migration]] = {"1.0": ("1.1", _call_resolution_11)}
+
+
+def migrate(root: Path) -> dict[str, Any]:
+    """Upgrade `.aicontext/` to the current schema, then rebuild every artifact.
+
+    Narrative sections, audit findings, and decisions are preserved; generated
+    artifacts are simply regenerated by a full scan.
+    """
+    manifest = load_manifest(root)
+    if manifest is None:
+        raise UserError("CODEATLAS is not initialized in this repo.")
+    if repo_state(root, manifest.get("repo_id")) != RepoState.ENABLED:
+        raise NotEnabledError("Enable CODEATLAS for this repo before migrating its artifacts.")
+    start = str(manifest.get("schema_version", "1.0"))
+    version = start
+    steps = []
+    while version != SCHEMA_VERSION:
+        if version not in MIGRATIONS:
+            raise UserError(
+                f"no migration from schema {version} to {SCHEMA_VERSION}; run `codeatlas scan --full`"
+            )
+        nxt, fn = MIGRATIONS[version]
+        manifest = fn(root, manifest)
+        steps.append(f"{version} -> {nxt}")
+        version = nxt
+    from codeatlas.lifecycle import scan
+
+    # The index writer publishes the version with regenerated artifacts.
+    # A failed rebuild must not publish a premature schema upgrade.
+    scan(root, full=True)
+    return {
+        "from": start,
+        "to": SCHEMA_VERSION,
+        "steps": steps,
+        "rebuilt": True,
+        "codeatlas_version": __version__,
+    }
+
+
+# --- watch -----------------------------------------------------------------------------------
+
+
+def watch(
+    root: Path,
+    interval: float = 1.0,
+    on_update: Callable[[Any], None] | None = None,
+    stop: Callable[[], bool] | None = None,
+) -> None:
+    """Poll for changes and run `update` (for editors/agents without hooks). Ctrl+C stops."""
+    from codeatlas.lifecycle import update
+
+    manifest = load_manifest(root)
+    if manifest is None:
+        raise UserError("CODEATLAS is not initialized in this repo.")
+    while stop is None or not stop():
+        manifest = load_manifest(root) or manifest
+        state = repo_state(root, manifest.get("repo_id"))
+        if state is RepoState.NOT_ENABLED:
+            raise NotEnabledError(
+                "CODEATLAS is not enabled for you in this repo; run `codeatlas enable` first."
+            )
+        if state is RepoState.ENABLED:
+            result = update(root)
+            if not result.skipped and on_update is not None:
+                on_update(result)
+        time.sleep(interval)
+
+
+HOOK_FILES = {
+    "antigravity": ".agents/hooks.json",
+    "claude-code": ".claude/settings.json",
+    "codex": ".codex/hooks.json",
+    "gemini": ".gemini/settings.json",
+    "cursor": ".cursor/hooks.json",
+}
+
+
+def session_report(root: Path, session: str) -> list[Check]:
+    """Was CODEATLAS used in one agent session, and if not, why not (`codeatlas doctor --session`)."""
+    from codeatlas.writers.worklog import _digest, sessions
+
+    checks: list[Check] = []
+
+    def add(name: str, status: str, detail: str) -> None:
+        checks.append(Check(name, status, detail))
+
+    logs = sessions(root)
+    if session == "latest":
+        log = logs[0] if logs else None
+    else:
+        log = next((entry for entry in logs if entry.digest == _digest(session)), None)
+    if log is None:
+        add(
+            "session",
+            "warn",
+            "no work log for it: the hooks never ran there, the work log is off "
+            "(`worklog = false`), or CODEATLAS was not enabled for you in this repo",
+        )
+        return checks
+    add(
+        "session",
+        "ok",
+        f"{log.digest}: {len(log.requests)} request(s), {len(log.edits)} file(s) edited"
+        + (f", agent {log.host}" if log.host else ""),
+    )
+
+    hook = [d for d in log.deliveries if d[0] == "hook"]
+    delivered = [d for d in hook if d[1]]
+    tools = [d for d in log.deliveries if d[0] in ("cli", "mcp") and d[1]]
+    if delivered:
+        add("hook", "ok", f"delivered a packet {len(delivered)} time(s)")
+    elif hook:
+        reasons = sorted({d[2] for d in hook if d[2]})
+        add(
+            "hook",
+            "warn",
+            "fired but added nothing: " + "; ".join(reasons or ["no reason recorded"]),
+        )
+    else:
+        present = [f for f in HOOK_FILES.values() if (root / f).is_file()]
+        where = ", ".join(present) if present else "none of " + ", ".join(HOOK_FILES.values())
+        add(
+            "hook",
+            "fail",
+            f"never fired in this session. Hook config files here: {where}. "
+            "Run `codeatlas init --hooks` for your agent, then restart it.",
+        )
+    if tools:
+        by = sorted({d[0] for d in tools})
+        add("tool calls", "ok", f"{len(tools)} call(s) via {', '.join(by)}")
+    else:
+        add("tool calls", "warn", "the agent never called `codeatlas task` / `codeatlas_task`")
+    if not delivered and not tools:
+        block = (root / "AGENTS.md").is_file() or (root / "CLAUDE.md").is_file()
+        add(
+            "verdict",
+            "fail",
+            "CODEATLAS was not used here. "
+            + (
+                "The instruction block exists, so the agent ignored it: prefer the hook."
+                if block
+                else "No instruction block was found: run `codeatlas init`."
+            ),
+        )
+    else:
+        add("verdict", "ok", "CODEATLAS was used in this session")
+    return checks
