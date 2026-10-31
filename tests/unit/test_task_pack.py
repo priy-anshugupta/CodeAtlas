@@ -1,0 +1,214 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+from typer.testing import CliRunner
+
+from codeatlas.cli import app
+from codeatlas.core.errors import UserError
+from codeatlas.core.tokens import estimate_tokens
+from codeatlas.lifecycle import apply_init, plan_init, scan, update
+from codeatlas.mcp.server import CodeAtlasTools, enabled_tools
+from codeatlas.navigator.api import op_task
+from codeatlas.navigator.source_index import search_sources
+from codeatlas.navigator.store import IndexStore
+from codeatlas.navigator.task_pack import render_task
+
+
+@pytest.fixture
+def indexed(small_repo: Path) -> Path:
+    apply_init(plan_init(small_repo))
+    scan(small_repo)
+    return small_repo
+
+
+@pytest.mark.parametrize("budget", [128, 256, 512, 2000])
+def test_packet_budget_includes_source_and_serialization(indexed: Path, budget: int) -> None:
+    with_store = IndexStore.open(indexed)
+    try:
+        pack = op_task(with_store, "apply_discount", budget)
+        assert (
+            estimate_tokens(json.dumps(pack, separators=(",", ":"), ensure_ascii=False)) <= budget
+        )
+        assert estimate_tokens(render_task(pack)) <= budget
+        assert pack["budget"]["used_est"] <= budget
+        for block in pack["blocks"]:
+            lines = (indexed / block["file"]).read_text().splitlines()
+            start, end = block["lines"]
+            from codeatlas.navigator.task_pack import _source_excerpt
+
+            ranges = [tuple(pair) for pair in block.get("source_ranges", [[start, end]])]
+            assert block["source"] == _source_excerpt(lines, ranges, compact=True)
+    finally:
+        with_store.close()
+
+
+def test_one_call_contains_code_and_graph(indexed: Path) -> None:
+    store = IndexStore.open(indexed)
+    try:
+        pack = op_task(store, "shop.pricing.discounts.apply_discount")
+        block = pack["blocks"][0]
+        assert block["symbol"] == "shop.pricing.discounts.apply_discount"
+        assert "return amount.scale" in block["source"]
+        assert not block["truncated"]
+        assert any(link["role"] == "caller" for link in pack["links"])
+        assert any(link["role"] == "test" for link in pack["links"])
+    finally:
+        store.close()
+
+
+def test_non_test_callers_match_unique_name_source_oracle(indexed: Path) -> None:
+    import ast
+
+    expected = set()
+    for path in (indexed / "src").rglob("*.py"):
+        source = path.read_text(encoding="utf-8")
+        try:
+            tree = ast.parse(source)
+        except SyntaxError:
+            assert "apply_discount(" not in source  # unrelated intentionally broken fixture
+            continue
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "apply_discount"
+            ):
+                expected.add((path.relative_to(indexed).as_posix(), node.lineno))
+    store = IndexStore.open(indexed)
+    try:
+        pack = op_task(store, "shop.pricing.discounts.apply_discount", 2000)
+        actual = {
+            (link["file"], link["line"])
+            for link in pack["links"]
+            if link["role"] == "caller"
+            and link["target"] == "shop.pricing.discounts.apply_discount"
+        }
+        assert expected and expected <= actual
+    finally:
+        store.close()
+
+
+def test_body_only_terms_persist_and_warm_queries_skip_source_reads(
+    indexed: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    file = indexed / "src/shop/pricing/discounts.py"
+    file.write_text(file.read_text() + "\n# coppermoon special case\n")
+    update(indexed)
+    store = IndexStore.open(indexed)
+    try:
+        assert search_sources(store, "coppermoon")[0][0] == "src/shop/pricing/discounts.py"
+    finally:
+        store.close()
+    # A new session reuses the persisted postings, without reading any source bodies.
+    store = IndexStore.open(indexed)
+    monkeypatch.setattr(
+        "codeatlas.navigator.source_index.read_indexed_source",
+        lambda *args: pytest.fail("warm retrieval reread source"),
+    )
+    try:
+        assert search_sources(store, "coppermoon")[0][0] == "src/shop/pricing/discounts.py"
+    finally:
+        store.close()
+
+
+def test_same_length_body_edit_refreshes_only_changed_file(
+    indexed: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import codeatlas.navigator.source_index as source_index
+
+    file = indexed / "src/shop/pricing/discounts.py"
+    file.write_text(file.read_text() + "\n# coppermoon\n")
+    update(indexed)
+    store = IndexStore.open(indexed)
+    search_sources(store, "coppermoon")
+    file.write_text(file.read_text().replace("coppermoon", "silvermoon"))
+    update(indexed)
+    assert not store.is_current()
+    store.close()
+    store = IndexStore.open(indexed)
+    real_read = source_index.read_indexed_source
+    reads: list[str] = []
+
+    def read(st: IndexStore, path: str) -> str | None:
+        reads.append(path)
+        return real_read(st, path)
+
+    monkeypatch.setattr(source_index, "read_indexed_source", read)
+    try:
+        assert search_sources(store, "silvermoon")[0][0] == "src/shop/pricing/discounts.py"
+        assert search_sources(store, "coppermoon") == []
+        assert reads == ["src/shop/pricing/discounts.py"]
+    finally:
+        store.close()
+
+
+def test_stale_source_not_returned(indexed: Path) -> None:
+    store = IndexStore.open(indexed)
+    try:
+        op_task(store, "apply_discount")
+        file = indexed / "src/shop/pricing/discounts.py"
+        file.write_text(file.read_text().replace("amount.scale", "amount.changed"))
+        pack = op_task(store, "apply_discount")
+        assert pack["stale_sources"] > 0
+        assert all(b["file"] != "src/shop/pricing/discounts.py" for b in pack["blocks"])
+        assert "codeatlas update" in render_task(pack)
+    finally:
+        store.close()
+
+
+def test_task_cli_mcp_parity_and_invalid_budget(indexed: Path) -> None:
+    tools = CodeAtlasTools(indexed)
+    try:
+        assert "codeatlas_task" in enabled_tools(indexed)
+        packet = tools.codeatlas_task("apply_discount", 512)
+        cli = CliRunner().invoke(
+            app, ["task", "apply_discount", "--root", str(indexed), "--budget", "512", "--json"]
+        )
+        assert cli.exit_code == 0, cli.output
+        assert json.loads(cli.output) == packet
+        assert tools.codeatlas_task("apply_discount", 1)["error"] == "user_error"
+        with pytest.raises(UserError):
+            op_task(tools.store(), "apply_discount", 1000000)
+        assert op_task(tools.store(), "", 128)["blocks"] == []
+    finally:
+        if tools._store:
+            tools._store.close()
+
+
+def _sym(sid: str, name: str, doc: str = "", file: str = "pkg/mod.py") -> object:
+    from codeatlas.navigator.store import SymbolRow
+
+    return SymbolRow(
+        sid, name, "function", "pkg.mod", file, 10, 20, "", doc, "public", None, 0.0, 30
+    )
+
+
+def test_search_channel_offers_a_clear_name_match_no_line_matched() -> None:
+    from codeatlas.navigator.task_pack import _Block, _search_blocks
+
+    leader = _sym("pkg.graph.pick_seeds", "pick_seeds", "Choose seed symbols per label.")
+    runner = _sym("pkg.ui.select", "select_row", file="pkg/ui.py")
+    blocks = [_Block("pkg/other.py", 1, 5, None, 4.0, [1])]
+    _search_blocks(blocks, [(leader, 14.0), (runner, 9.0)], False, {"seed": 1.0, "label": 1.0})
+    added = [b for b in blocks if b.role == "search"]
+    assert [b.symbol.id for b in added] == ["pkg.graph.pick_seeds"]
+    assert added[0].score < 4.0  # offered below the best lexical evidence, never above it
+
+
+def test_search_channel_stays_out_when_anchored_or_path_only_or_no_leader() -> None:
+    from codeatlas.navigator.task_pack import _Block, _search_blocks
+
+    money = _sym("shop.money.Money", "Money", file="shop/money.py")
+    other = _sym("shop.cart.total", "total", file="shop/cart.py")
+    terms = {"shop": 1.0, "promot": 1.0}
+    for found, anchored in (
+        ([(money, 0.5), (other, 0.2)], False),  # only the path matches "shopper"
+        ([(other, 0.5), (money, 0.48)], False),  # no clear leader
+        ([(_sym("p.m.promote", "promote"), 0.5)], True),  # an exact name already says where
+    ):
+        blocks = [_Block("pkg/other.py", 1, 5, None, 4.0, [1])]
+        _search_blocks(blocks, found, anchored, terms)
+        assert [b.role for b in blocks] == ["candidate"] and blocks[0].score == 4.0
