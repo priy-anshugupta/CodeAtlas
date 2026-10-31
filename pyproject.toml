@@ -1,0 +1,94 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codeatlas-ctx"
+version = "0.1.0"
+description = "A persistent, local context layer for AI coding agents."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+keywords = ["ai", "coding-agent", "code-index", "mcp", "context"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Environment :: Console",
+    "Topic :: Software Development",
+]
+dependencies = [
+    "typer>=0.12",
+    "rich>=13",
+    "pathspec>=0.12",
+    "jsonschema>=4",
+    "mcp>=1.2",
+    "tomli>=2.0; python_version < '3.11'",
+]
+
+[project.optional-dependencies]
+# JavaScript, TypeScript, Go, and Java via tree-sitter grammars.
+dart = ["tree-sitter>=0.23", "tree-sitter-dart==0.1.0"]
+kotlin = ["tree-sitter>=0.23", "tree-sitter-kotlin==1.1.0"]
+swift = ["tree-sitter>=0.23", "tree-sitter-swift==0.7.3"]
+treesitter = [
+    "tree-sitter>=0.23",
+    "tree-sitter-javascript>=0.23",
+    "tree-sitter-typescript>=0.23",
+    "tree-sitter-go>=0.23",
+    "tree-sitter-java>=0.23",
+]
+# Optional local embeddings for `codeatlas task` and `codeatlas search --semantic` (the model must
+# already be on disk). BERT models with mean pooling, such as the default all-MiniLM-L6-v2, run
+# on NumPy alone; `semantic-full` adds sentence-transformers (PyTorch) for any other model.
+semantic = ["numpy>=1.24", "tokenizers>=0.15", "safetensors>=0.4"]
+semantic-full = ["numpy>=1.24", "tokenizers>=0.15", "safetensors>=0.4", "sentence-transformers>=2.2"]
+dev = ["pytest>=7", "ruff>=0.5", "mypy>=1.8"]
+
+[project.scripts]
+codeatlas = "codeatlas.entry:main"
+
+[tool.setuptools]
+license-files = [
+    "LICENSE",
+]
+
+[tool.setuptools.packages.find]
+include = ["codeatlas*"]
+
+[tool.setuptools.package-data]
+codeatlas = ["schemas/*.json", "templates/**/*", "viewer_dist/**/*", "py.typed"]
+
+[tool.codeatlas]
+# Fixture repos and local benchmark outputs are not part of CODEATLAS itself.
+ignore = ["tests/fixtures/", "tests/golden/", "tmp/", "output/"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = ["tests/fixtures"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
+# E501: the formatter owns line length; long prose/SQL strings are left intact.
+ignore = ["RUF001", "RUF002", "RUF003", "E501"]
+
+[tool.mypy]
+strict = true
+# Checked against the interpreter it runs on (CI covers 3.10-3.14), so the
+# `tomllib` / `tomli` branches are each checked where they actually apply.
+packages = ["codeatlas"]
+
+[[tool.mypy.overrides]]
+module = ["jsonschema", "jsonschema.*", "tree_sitter", "tree_sitter_javascript", "tree_sitter_typescript", "tree_sitter_go", "tree_sitter_java", "tree_sitter_dart", "tree_sitter_kotlin", "tree_sitter_swift", "sentence_transformers", "numpy", "tokenizers", "safetensors", "safetensors.*"]
+ignore_missing_imports = true
+follow_imports = "skip"
+
+[tool.pytest.ini_options]
+markers = ["context_regression: frozen offline context scores with the owner-approved recall margin"]
+testpaths = ["tests"]
+norecursedirs = ["tests/fixtures", "tests/golden"]
+addopts = "-q"
