@@ -1,0 +1,1066 @@
+{
+  "run_started_unix": 1791694230.7643945,
+  "run_finished_unix": 1791694396.8616009,
+  "model": "minilm",
+  "device": "cpu/numpy",
+  "dataset_sha256": "afa8d9b9bce135e54d5001014258d424ba4c776137762e3d3d5a94a0da750f57",
+  "cold_seconds": 0.24854260007850826,
+  "index_seconds": 162.21385890000965,
+  "vector_bytes": 2952192,
+  "unique_symbol_texts": 1922,
+  "peak_working_set_bytes": 927309824,
+  "warm_query_median_ms": 20.7282499759458,
+  "warm_query_p95_ms": 30.103429988957938,
+  "file_gold_total": 61,
+  "file_recall5": 0.22950819672131148,
+  "file_recall10": 0.3114754098360656,
+  "code_cases": 9,
+  "code_recall5": 0.75,
+  "code_recall10": 1.0,
+  "rows": [
+    {
+      "query": "do not read API names like min(3) as units of time in quantity literals",
+      "gold": [
+        "codeatlas/navigator/literals.py"
+      ],
+      "top10": [
+        "codeatlas/navigator/literals.py",
+        "codeatlas/navigator/recall.py",
+        "tests/benchmarks/agent_stats.py",
+        "codeatlas/navigator/context_pack.py",
+        "codeatlas/navigator/feedback.py",
+        "codeatlas/navigator/task_pack.py",
+        "tests/benchmarks/edit_bench.py",
+        "codeatlas/core/tokens.py",
+        "tests/test_agent_measure.py",
+        "tests/unit/test_context_engine.py"
+      ],
+      "hits5": 1,
+      "hits10": 1
+    },
+    {
+      "query": "skip the numpy import when the semantic channel is off; close SQLite handles when cache setup fails",
+      "gold": [
+        "codeatlas/incremental/hash_cache.py",
+        "codeatlas/navigator/semantic.py",
+        "codeatlas/navigator/source_index.py"
+      ],
+      "top10": [
+        "codeatlas/navigator/cache_db.py",
+        "codeatlas/incremental/hash_cache.py",
+        "codeatlas/navigator/source_index.py",
+        "tests/integration/test_semantic_task.py",
+        "codeatlas/viewer/api.py",
+        "codeatlas/navigator/textcorpus.py",
+        "codeatlas/cli.py",
+        "codeatlas/mcp/server.py",
+        "tests/integration/test_prompt_hook.py",
+        "tests/integration/test_phase5.py"
+      ],
+      "hits5": 2,
+      "hits10": 2
+    },
+    {
+      "query": "make seed selection match the previous behaviour when labels repeat",
+      "gold": [
+        "codeatlas/navigator/graphwalk.py"
+      ],
+      "top10": [
+        "codeatlas/navigator/graphwalk.py",
+        "tests/integration/test_audit.py",
+        "codeatlas/graph/blast.py",
+        "codeatlas/navigator/task_pack.py",
+        "tests/unit/test_navigator.py",
+        "codeatlas/writers/graph_export.py",
+        "tests/unit/test_context_engine.py",
+        "codeatlas/drift/scoring.py",
+        "codeatlas/navigator/context_pack.py",
+        "codeatlas/navigator/impact.py"
+      ],
+      "hits5": 1,
+      "hits10": 1
+    },
+    {
+      "query": "register codeatlas_task without a derived output schema so Python 3.10 SDKs accept its result",
+      "gold": [
+        "codeatlas/mcp/server.py"
+      ],
+      "top10": [
+        "codeatlas/navigator/semantic.py",
+        "codeatlas/navigator/taskrun.py",
+        "codeatlas/navigator/daemon.py",
+        "codeatlas/mcp/server.py",
+        "tests/integration/test_prompt_hook.py",
+        "tests/benchmarks/edit_bench.py",
+        "codeatlas/hooks/antigravity.py",
+        "codeatlas/entry.py",
+        "tests/integration/test_trust_fixes.py",
+        "tests/unit/test_task_pack.py"
+      ],
+      "hits5": 1,
+      "hits10": 1
+    },
+    {
+      "query": "skip optional-dependency tests without the extras, short socket paths on macOS, LF viewer bundle",
+      "gold": [
+        "codeatlas/navigator/daemon.py"
+      ],
+      "top10": [
+        "tests/integration/test_integrations.py",
+        "tests/integration/test_cli.py",
+        "codeatlas/navigator/store.py",
+        "tests/unit/test_discovery.py",
+        "tests/unit/test_config.py",
+        "codeatlas/navigator/task_pack.py",
+        "codeatlas/extractors/toolchain.py",
+        "tests/integration/test_antigravity_hook.py",
+        "codeatlas/viewer/server.py",
+        "tests/integration/test_scan.py"
+      ],
+      "hits5": 0,
+      "hits10": 0
+    },
+    {
+      "query": "satisfy strict typing in the read dedupe and keep the viewer bundle LF",
+      "gold": [
+        "codeatlas/hooks/dedupe.py"
+      ],
+      "top10": [
+        "codeatlas/navigator/task_pack.py",
+        "codeatlas/navigator/semantic.py",
+        "codeatlas/extractors/config_keys.py",
+        "codeatlas/integrations/base.py",
+        "codeatlas/viewer/api.py",
+        "codeatlas/viewer/server.py",
+        "codeatlas/integrations/claude_code.py",
+        "codeatlas/parsing/treesitter.py",
+        "codeatlas/navigator/support.py",
+        "tests/integration/test_integrations.py"
+      ],
+      "hits5": 0,
+      "hits10": 0
+    },
+    {
+      "query": "rebuild the shipped bundle and viewer API",
+      "gold": [
+        "codeatlas/viewer/api.py",
+        "codeatlas/viewer/model.py"
+      ],
+      "top10": [
+        "codeatlas/viewer/server.py",
+        "codeatlas/maintenance.py",
+        "tests/integration/test_viewer.py",
+        "codeatlas/writers/manifest.py",
+        "codeatlas/navigator/taskrun.py",
+        "codeatlas/navigator/store.py",
+        "codeatlas/cli.py",
+        "codeatlas/viewer/api.py",
+        "tests/integration/test_freshness.py",
+        "tests/unit/test_discovery.py"
+      ],
+      "hits5": 0,
+      "hits10": 1
+    },
+    {
+      "query": "find, diff, task --detail, init --all-skills and doctor --session",
+      "gold": [
+        "codeatlas/cli.py",
+        "codeatlas/maintenance.py"
+      ],
+      "top10": [
+        "codeatlas/integrations/claude_code.py",
+        "codeatlas/integrations/base.py",
+        "tests/integration/test_integrations.py",
+        "codeatlas/extractors/toolchain.py",
+        "codeatlas/navigator/recall.py",
+        "tests/benchmarks/tokens.py",
+        "tests/skills/test_skill_templates.py",
+        "codeatlas/integrations/antigravity.py",
+        "tests/unit/test_task_retrieval.py",
+        "codeatlas/writers/worklog.py"
+      ],
+      "hits5": 0,
+      "hits10": 0
+    },
+    {
+      "query": "codeatlas_find, detail levels and leaner tool profiles",
+      "gold": [
+        "codeatlas/mcp/server.py"
+      ],
+      "top10": [
+        "codeatlas/mcp/server.py",
+        "tests/benchmarks/tokens.py",
+        "codeatlas/hooks/prompt.py",
+        "codeatlas/cli.py",
+        "tests/integration/test_hooks_mcp.py",
+        "tests/test_agent_measure.py",
+        "codeatlas/config.py",
+        "tests/benchmarks/retrieval_eval.py",
+        "tests/benchmarks/run.py",
+        "tests/integration/test_integrations.py"
+      ],
+      "hits5": 1,
+      "hits10": 1
+    },
+    {
+      "query": "Antigravity hook and a 16 s prompt-hook budget",
+      "gold": [
+        "codeatlas/hooks/antigravity.py",
+        "codeatlas/hooks/entry.py",
+        "codeatlas/hooks/prompt.py",
+        "codeatlas/hooks/runner.py"
+      ],
+      "top10": [
+        "codeatlas/integrations/antigravity.py",
+        "tests/integration/test_prompt_hook.py",
+        "codeatlas/cli.py",
+        "codeatlas/integrations/base.py",
+        "tests/benchmarks/edit_bench.py",
+        "codeatlas/hooks/entry.py",
+        "codeatlas/integrations/gemini.py",
+        "codeatlas/hooks/gate.py",
+        "codeatlas/entry.py",
+        "tests/integration/test_integrations.py"
+      ],
+      "hits5": 0,
+      "hits10": 1
+    },
+    {
+      "query": "opt-in deny-only Read dedupe",
+      "gold": [
+        "codeatlas/hooks/dedupe.py"
+      ],
+      "top10": [
+        "tests/integration/test_gate_dedupe.py",
+        "tests/integration/test_worklog.py",
+        "tests/skills/test_skill_templates.py",
+        "tests/integration/test_freshness.py",
+        "tests/unit/test_json_read_retry.py",
+        "tests/integration/test_integrations.py",
+        "codeatlas/writers/json_writer.py",
+        "tests/integration/test_semantic_task.py",
+        "tests/unit/test_navigator.py",
+        "codeatlas/parsing/treesitter.py"
+      ],
+      "hits5": 0,
+      "hits10": 0
+    },
+    {
+      "query": "finish-time check that sends the agent back once when an old value remains",
+      "gold": [
+        "codeatlas/hooks/gate.py"
+      ],
+      "top10": [
+        "tests/integration/test_prompt_hook.py",
+        "codeatlas/cli.py",
+        "codeatlas/navigator/daemon.py",
+        "tests/integration/test_daemon.py",
+        "tests/integration/test_phase5.py",
+        "codeatlas/navigator/recall.py",
+        "codeatlas/maintenance.py",
+        "codeatlas/hooks/runner.py",
+        "codeatlas/hooks/prompt.py",
+        "tests/unit/test_consent.py"
+      ],
+      "hits5": 0,
+      "hits10": 0
+    },
+    {
+      "query": "filter noisy command output before it reaches the agent",
+      "gold": [
+        "codeatlas/outputfilter.py"
+      ],
+      "top10": [
+        "codeatlas/writers/activity.py",
+        "codeatlas/integrations/other_agents.py",
+        "codeatlas/cli.py",
+        "tests/integration/test_prompt_hook.py",
+        "codeatlas/integrations/__init__.py",
+        "tests/integration/test_integrations.py",
+        "codeatlas/integrations/base.py",
+        "tests/unit/test_extractors.py",
+        "tests/integration/test_daemon.py",
+        "tests/benchmarks/edit_bench.py"
+      ],
+      "hits5": 0,
+      "hits10": 0
+    },
+    {
+      "query": "local ranking feedback from edited files",
+      "gold": [
+        "codeatlas/navigator/feedback.py"
+      ],
+      "top10": [
+        "codeatlas/navigator/fusion.py",
+        "tests/integration/test_update_paths.py",
+        "codeatlas/navigator/task_pack.py",
+        "codeatlas/hooks/runner.py",
+        "codeatlas/cli.py",
+        "tests/integration/test_audit.py",
+        "codeatlas/navigator/literals.py",
+        "codeatlas/navigator/source_index.py",
+        "codeatlas/integrations/base.py",
+        "codeatlas/navigator/context_pack.py"
+      ],
+      "hits5": 0,
+      "hits10": 0
+    },
+    {
+      "query": "warm query process and fast task path",
+      "gold": [
+        "codeatlas/navigator/daemon.py",
+        "codeatlas/navigator/taskrun.py",
+        "codeatlas/taskfast.py"
+      ],
+      "top10": [
+        "codeatlas/hooks/runner.py",
+        "codeatlas/lifecycle.py",
+        "tests/integration/test_prompt_hook.py",
+        "codeatlas/navigator/api.py",
+        "codeatlas/navigator/freshness.py",
+        "tests/unit/test_enrich.py",
+        "tests/unit/test_edit_bench.py",
+        "tests/benchmarks/tokens.py",
+        "codeatlas/hooks/prompt.py",
+        "codeatlas/navigator/cache_db.py"
+      ],
+      "hits5": 0,
+      "hits10": 0
+    },
+    {
+      "query": "checked unified-diff patches and twin detection in task packets",
+      "gold": [
+        "codeatlas/navigator/enrich.py",
+        "codeatlas/navigator/patchcmd.py",
+        "codeatlas/navigator/task_pack.py"
+      ],
+      "top10": [
+        "codeatlas/writers/task_cache.py",
+        "tests/unit/test_context_engine.py",
+        "tests/integration/test_incremental.py",
+        "tests/integration/test_prompt_hook.py",
+        "tests/test_agent_measure.py",
+        "tests/integration/test_freshness.py",
+        "tests/unit/test_navigator.py",
+        "tests/benchmarks/edit_bench.py",
+        "tests/unit/test_task_disclosure.py",
+        "codeatlas/navigator/session.py"
+      ],
+      "hits5": 0,
+      "hits10": 0
+    },
+    {
+      "query": "record per-session requests, edits and notes locally",
+      "gold": [
+        "codeatlas/writers/activity.py",
+        "codeatlas/writers/worklog.py"
+      ],
+      "top10": [
+        "codeatlas/cli.py",
+        "codeatlas/navigator/session.py",
+        "tests/integration/test_freshness.py",
+        "tests/integration/test_prompt_hook.py",
+        "tests/integration/test_cli.py",
+        "codeatlas/navigator/api.py",
+        "tests/benchmarks/agent_collect.py",
+        "codeatlas/viewer/api.py",
+        "tests/benchmarks/edit_bench.py",
+        "tests/integration/test_hooks_mcp.py"
+      ],
+      "hits5": 0,
+      "hits10": 0
+    },
+    {
+      "query": "UTF-8 text helpers and repository boundary handling",
+      "gold": [
+        "codeatlas/core/paths.py",
+        "codeatlas/core/textio.py",
+        "codeatlas/graph/call_graph.py",
+        "codeatlas/health/git_intel.py"
+      ],
+      "top10": [
+        "codeatlas/hooks/entry.py",
+        "tests/integration/test_refresh.py",
+        "codeatlas/navigator/support.py",
+        "tests/integration/test_prompt_hook.py",
+        "codeatlas/integrations/base.py",
+        "tests/benchmarks/tokens.py",
+        "tests/unit/test_python_parser.py",
+        "codeatlas/integrations/common.py",
+        "tests/benchmarks/edit_bench.py",
+        "tests/skills/test_skill_templates.py"
+      ],
+      "hits5": 0,
+      "hits10": 0
+    },
+    {
+      "query": "retry artifact reads that race an atomic replace on Windows",
+      "gold": [
+        "codeatlas/writers/json_writer.py",
+        "codeatlas/writers/manifest.py"
+      ],
+      "top10": [
+        "tests/integration/test_viewer.py",
+        "codeatlas/writers/json_writer.py",
+        "tests/integration/test_freshness.py",
+        "codeatlas/writers/index_writer.py",
+        "codeatlas/cli.py",
+        "tests/unit/test_context_engine.py",
+        "codeatlas/maintenance.py",
+        "codeatlas/navigator/freshness.py",
+        "tests/integration/test_scan.py",
+        "tests/unit/test_consent.py"
+      ],
+      "hits5": 1,
+      "hits10": 1
+    },
+    {
+      "query": "align CLI and MCP delivery with adaptive prompt context",
+      "gold": [
+        "codeatlas/cli.py",
+        "codeatlas/hooks/prompt.py",
+        "codeatlas/mcp/server.py"
+      ],
+      "top10": [
+        "codeatlas/cli.py",
+        "codeatlas/navigator/source_index.py",
+        "codeatlas/integrations/base.py",
+        "tests/benchmarks/agent_collect.py",
+        "tests/integration/test_integrations.py",
+        "tests/integration/test_hooks_mcp.py",
+        "codeatlas/integrations/antigravity.py",
+        "codeatlas/integrations/other_agents.py",
+        "codeatlas/integrations/codex.py",
+        "tests/benchmarks/edit_bench.py"
+      ],
+      "hits5": 1,
+      "hits10": 1
+    },
+    {
+      "query": "check every installed agent integration",
+      "gold": [
+        "codeatlas/maintenance.py"
+      ],
+      "top10": [
+        "codeatlas/integrations/__init__.py",
+        "codeatlas/integrations/other_agents.py",
+        "tests/integration/test_integrations.py",
+        "codeatlas/integrations/base.py",
+        "codeatlas/integrations/antigravity.py",
+        "codeatlas/integrations/codex.py",
+        "codeatlas/lifecycle.py",
+        "codeatlas/cli.py",
+        "codeatlas/integrations/claude_code.py",
+        "codeatlas/integrations/git_hooks.py"
+      ],
+      "hits5": 0,
+      "hits10": 0
+    },
+    {
+      "query": "register all six agents with hook and MCP capabilities",
+      "gold": [
+        "codeatlas/integrations/__init__.py"
+      ],
+      "top10": [
+        "codeatlas/cli.py",
+        "codeatlas/integrations/other_agents.py",
+        "tests/test_agent_measure.py",
+        "codeatlas/integrations/__init__.py",
+        "codeatlas/lifecycle.py",
+        "tests/integration/test_integrations.py",
+        "codeatlas/integrations/base.py",
+        "codeatlas/integrations/codex.py",
+        "codeatlas/integrations/claude_code.py",
+        "tests/unit/test_writers.py"
+      ],
+      "hits5": 1,
+      "hits10": 1
+    },
+    {
+      "query": "split Cursor rules and add Cursor hooks",
+      "gold": [
+        "codeatlas/integrations/other_agents.py"
+      ],
+      "top10": [
+        "codeatlas/integrations/other_agents.py",
+        "tests/integration/test_integrations.py",
+        "codeatlas/integrations/hooks_json.py",
+        "codeatlas/hooks/formats.py",
+        "codeatlas/parsing/python_ast.py",
+        "codeatlas/navigator/store.py",
+        "codeatlas/entry.py",
+        "codeatlas/cli.py",
+        "codeatlas/integrations/common.py",
+        "tests/unit/test_python_parser.py"
+      ],
+      "hits5": 1,
+      "hits10": 1
+    },
+    {
+      "query": "add experimental Antigravity support",
+      "gold": [
+        "codeatlas/integrations/antigravity.py"
+      ],
+      "top10": [
+        "codeatlas/cli.py",
+        "codeatlas/integrations/base.py",
+        "codeatlas/integrations/gemini.py",
+        "codeatlas/viewer/server.py",
+        "tests/integration/test_phase5.py",
+        "codeatlas/navigator/store.py",
+        "codeatlas/writers/graph_export.py",
+        "tests/integration/test_integrations.py",
+        "codeatlas/health/risk.py",
+        "codeatlas/navigator/literals.py"
+      ],
+      "hits5": 0,
+      "hits10": 0
+    },
+    {
+      "query": "add Gemini CLI support",
+      "gold": [
+        "codeatlas/integrations/gemini.py"
+      ],
+      "top10": [
+        "codeatlas/cli.py",
+        "codeatlas/integrations/codex.py",
+        "codeatlas/mcp/server.py",
+        "codeatlas/integrations/claude_code.py",
+        "codeatlas/hooks/runner.py",
+        "tests/integration/test_integrations.py",
+        "tests/integration/test_hooks_mcp.py",
+        "tests/integration/test_scan.py",
+        "codeatlas/integrations/other_agents.py",
+        "codeatlas/core/errors.py"
+      ],
+      "hits5": 0,
+      "hits10": 0
+    },
+    {
+      "query": "install the prompt hook for Claude Code",
+      "gold": [
+        "codeatlas/integrations/claude_code.py"
+      ],
+      "top10": [
+        "codeatlas/integrations/claude_code.py",
+        "codeatlas/cli.py",
+        "codeatlas/integrations/__init__.py",
+        "codeatlas/hooks/prompt.py",
+        "tests/integration/test_integrations.py",
+        "tests/integration/test_incremental.py",
+        "codeatlas/entry.py",
+        "codeatlas/integrations/other_agents.py",
+        "tests/unit/test_phase3_extractors.py",
+        "tests/integration/test_hooks_mcp.py"
+      ],
+      "hits5": 1,
+      "hits10": 1
+    },
+    {
+      "query": "add managed TOML blocks and per-agent status checks",
+      "gold": [
+        "codeatlas/integrations/base.py"
+      ],
+      "top10": [
+        "codeatlas/cli.py",
+        "codeatlas/integrations/other_agents.py",
+        "codeatlas/config.py",
+        "codeatlas/consent/registry.py",
+        "codeatlas/status.py",
+        "codeatlas/integrations/base.py",
+        "tests/integration/test_hooks_mcp.py",
+        "tests/integration/test_cli.py",
+        "tests/integration/test_incremental.py",
+        "codeatlas/maintenance.py"
+      ],
+      "hits5": 0,
+      "hits10": 1
+    },
+    {
+      "query": "add helpers for managed hooks.json files",
+      "gold": [
+        "codeatlas/integrations/hooks_json.py"
+      ],
+      "top10": [
+        "codeatlas/integrations/claude_code.py",
+        "tests/integration/test_integrations.py",
+        "codeatlas/cli.py",
+        "tests/integration/test_hooks_mcp.py",
+        "codeatlas/integrations/git_hooks.py",
+        "codeatlas/hooks/formats.py",
+        "tests/test_agent_measure.py",
+        "codeatlas/hooks/entry.py",
+        "codeatlas/integrations/base.py",
+        "tests/benchmarks/tokens.py"
+      ],
+      "hits5": 0,
+      "hits10": 0
+    },
+    {
+      "query": "add codeatlas_task and a lean tool profile by default",
+      "gold": [
+        "codeatlas/mcp/server.py"
+      ],
+      "top10": [
+        "tests/benchmarks/tokens.py",
+        "codeatlas/mcp/server.py",
+        "codeatlas/cli.py",
+        "tests/unit/test_config.py",
+        "codeatlas/lifecycle.py",
+        "tests/benchmarks/run.py",
+        "codeatlas/core/errors.py",
+        "tests/test_agent_measure.py",
+        "codeatlas/config.py",
+        "codeatlas/hooks/prompt.py"
+      ],
+      "hits5": 1,
+      "hits10": 1
+    },
+    {
+      "query": "add task, brief --full, user-prompt hook, mcp profiles and multi-file update",
+      "gold": [
+        "codeatlas/cli.py"
+      ],
+      "top10": [
+        "codeatlas/cli.py",
+        "codeatlas/integrations/claude_code.py",
+        "codeatlas/integrations/base.py",
+        "tests/integration/test_integrations.py",
+        "tests/benchmarks/tokens.py",
+        "tests/integration/test_hooks_mcp.py",
+        "codeatlas/lifecycle.py",
+        "codeatlas/integrations/git_hooks.py",
+        "codeatlas/integrations/other_agents.py",
+        "codeatlas/hooks/prompt.py"
+      ],
+      "hits5": 1,
+      "hits10": 1
+    },
+    {
+      "query": "add a light console entry point",
+      "gold": [
+        "codeatlas/__main__.py",
+        "codeatlas/entry.py"
+      ],
+      "top10": [
+        "codeatlas/core/models.py",
+        "codeatlas/hooks/prompt.py",
+        "codeatlas/extractors/entry_points.py",
+        "tests/unit/test_extractors.py",
+        "codeatlas/core/markers.py",
+        "codeatlas/hooks/formats.py",
+        "codeatlas/integrations/other_agents.py",
+        "codeatlas/cli.py",
+        "codeatlas/writers/decisions.py",
+        "codeatlas/viewer/server.py"
+      ],
+      "hits5": 0,
+      "hits10": 0
+    },
+    {
+      "query": "add the user-prompt hook that adds retrieval to the request",
+      "gold": [
+        "codeatlas/hooks/__init__.py",
+        "codeatlas/hooks/prompt.py"
+      ],
+      "top10": [
+        "codeatlas/hooks/formats.py",
+        "tests/integration/test_viewer.py",
+        "codeatlas/cli.py",
+        "codeatlas/navigator/task_pack.py",
+        "codeatlas/viewer/api.py",
+        "codeatlas/navigator/api.py",
+        "tests/integration/test_integrations.py",
+        "codeatlas/parsing/smells.py",
+        "codeatlas/navigator/render.py",
+        "codeatlas/viewer/server.py"
+      ],
+      "hits5": 0,
+      "hits10": 0
+    },
+    {
+      "query": "parse edited paths from every agent's hook payload",
+      "gold": [
+        "codeatlas/hooks/runner.py"
+      ],
+      "top10": [
+        "codeatlas/hooks/runner.py",
+        "tests/integration/test_hooks_mcp.py",
+        "codeatlas/integrations/git_hooks.py",
+        "codeatlas/integrations/other_agents.py",
+        "codeatlas/integrations/base.py",
+        "tests/unit/test_phase3_extractors.py",
+        "codeatlas/incremental/hash_cache.py",
+        "codeatlas/integrations/__init__.py",
+        "codeatlas/parsing/treesitter.py",
+        "codeatlas/hooks/entry.py"
+      ],
+      "hits5": 1,
+      "hits10": 1
+    },
+    {
+      "query": "run index updates in a detached background job",
+      "gold": [
+        "codeatlas/hooks/update_job.py"
+      ],
+      "top10": [
+        "codeatlas/lifecycle.py",
+        "codeatlas/hooks/entry.py",
+        "codeatlas/navigator/source_index.py",
+        "tests/benchmarks/tokens.py",
+        "codeatlas/cli.py",
+        "codeatlas/navigator/api.py",
+        "codeatlas/navigator/store.py",
+        "codeatlas/maintenance.py",
+        "codeatlas/pipeline.py",
+        "codeatlas/navigator/freshness.py"
+      ],
+      "hits5": 0,
+      "hits10": 0
+    },
+    {
+      "query": "render hook context as text, json or cursor output",
+      "gold": [
+        "codeatlas/hooks/formats.py"
+      ],
+      "top10": [
+        "codeatlas/hooks/entry.py",
+        "codeatlas/navigator/render.py",
+        "codeatlas/writers/obsidian.py",
+        "codeatlas/cli.py",
+        "codeatlas/navigator/task_pack.py",
+        "codeatlas/core/markers.py",
+        "tests/integration/test_hooks_mcp.py",
+        "codeatlas/writers/json_writer.py",
+        "codeatlas/writers/graph_export.py",
+        "codeatlas/integrations/claude_code.py"
+      ],
+      "hits5": 0,
+      "hits10": 0
+    },
+    {
+      "query": "add a hook entry point that avoids importing typer and rich",
+      "gold": [
+        "codeatlas/hooks/entry.py"
+      ],
+      "top10": [
+        "codeatlas/integrations/claude_code.py",
+        "codeatlas/extractors/entry_points.py",
+        "codeatlas/core/models.py",
+        "codeatlas/core/markers.py",
+        "codeatlas/integrations/base.py",
+        "codeatlas/navigator/resolve.py",
+        "codeatlas/parsing/treesitter.py",
+        "codeatlas/cli.py",
+        "codeatlas/parsing/smells.py",
+        "tests/unit/test_python_parser.py"
+      ],
+      "hits5": 0,
+      "hits10": 0
+    },
+    {
+      "query": "shorten the shared instruction block",
+      "gold": [
+        "codeatlas/integrations/common.py"
+      ],
+      "top10": [
+        "codeatlas/parsing/python_ast.py",
+        "codeatlas/integrations/other_agents.py",
+        "codeatlas/integrations/base.py",
+        "tests/unit/test_python_parser.py",
+        "tests/unit/test_config.py",
+        "codeatlas/cli.py",
+        "tests/unit/test_discovery.py",
+        "codeatlas/hooks/runner.py",
+        "codeatlas/narrator/refresh.py",
+        "tests/skills/test_skill_templates.py"
+      ],
+      "hits5": 0,
+      "hits10": 0
+    },
+    {
+      "query": "inject a compact session brief and make narrative sections optional",
+      "gold": [
+        "codeatlas/writers/agents_md.py"
+      ],
+      "top10": [
+        "codeatlas/cli.py",
+        "codeatlas/hooks/runner.py",
+        "codeatlas/navigator/session.py",
+        "codeatlas/mcp/server.py",
+        "codeatlas/narrator/refresh.py",
+        "codeatlas/navigator/api.py",
+        "codeatlas/writers/agents_md.py",
+        "codeatlas/writers/narrative.py",
+        "tests/integration/test_hooks_mcp.py",
+        "tests/unit/test_writers.py"
+      ],
+      "hits5": 0,
+      "hits10": 1
+    },
+    {
+      "query": "retry artifact replacement after a Windows sharing violation",
+      "gold": [
+        "codeatlas/writers/json_writer.py"
+      ],
+      "top10": [
+        "codeatlas/maintenance.py",
+        "codeatlas/writers/index_writer.py",
+        "tests/unit/test_discovery.py",
+        "codeatlas/navigator/freshness.py",
+        "codeatlas/integrations/other_agents.py",
+        "tests/integration/test_viewer.py",
+        "tests/integration/test_scan.py",
+        "tests/integration/test_cli.py",
+        "codeatlas/cli.py",
+        "codeatlas/lifecycle.py"
+      ],
+      "hits5": 0,
+      "hits10": 0
+    },
+    {
+      "query": "move index writing into its own module",
+      "gold": [
+        "codeatlas/writers/__init__.py",
+        "codeatlas/writers/index_writer.py"
+      ],
+      "top10": [
+        "codeatlas/navigator/store.py",
+        "codeatlas/lifecycle.py",
+        "codeatlas/graph/symbol_table.py",
+        "codeatlas/writers/modules_md.py",
+        "codeatlas/navigator/source_index.py",
+        "codeatlas/writers/__init__.py",
+        "codeatlas/navigator/api.py",
+        "codeatlas/core/models.py",
+        "tests/benchmarks/tokens.py",
+        "codeatlas/pipeline.py"
+      ],
+      "hits5": 0,
+      "hits10": 1
+    }
+  ],
+  "code_rows": [
+    {
+      "exclude": "tests.integration.test_incremental.content",
+      "gold": [
+        "tests.integration.test_scan.content_files"
+      ],
+      "top10": [
+        "tests.integration.test_scan.content_files",
+        "codeatlas.writers.manifest.load_manifest",
+        "tests.integration.test_freshness.snapshot",
+        "tests.integration.test_prompt_hook.snapshot",
+        "codeatlas.viewer.model._read",
+        "codeatlas.viewer.server.Watcher._file_hashes",
+        "tests.integration.test_cli.snapshot",
+        "tests.integration.test_hooks_mcp.snapshot",
+        "codeatlas.incremental.hash_cache.StateCache.cached_parses",
+        "tests.benchmarks.agent_prepare.hashes"
+      ],
+      "hits5": 1,
+      "hits10": 1
+    },
+    {
+      "exclude": "tests.integration.test_freshness.snapshot",
+      "gold": [
+        "tests.integration.test_prompt_hook.snapshot"
+      ],
+      "top10": [
+        "tests.integration.test_prompt_hook.snapshot",
+        "tests.integration.test_cli.snapshot",
+        "tests.integration.test_hooks_mcp.snapshot",
+        "tests.integration.test_integrations.snapshot",
+        "codeatlas.lifecycle._snapshot_from_disk",
+        "tests.integration.test_incremental.content",
+        "codeatlas.navigator.bert_numpy.model_dir",
+        "tests.benchmarks.agent_prepare.hashes",
+        "codeatlas.incremental.hash_cache.StateCache.cached_parses",
+        "codeatlas.hooks.runner._root_from"
+      ],
+      "hits5": 1,
+      "hits10": 1
+    },
+    {
+      "exclude": "codeatlas.drift.structural_diff._group_of",
+      "gold": [
+        "codeatlas.writers.modules_md.group_of"
+      ],
+      "top10": [
+        "codeatlas.writers.modules_md.group_of",
+        "codeatlas.viewer.model._group_of",
+        "codeatlas.graph.symbol_table.ModuleIndex.package_of",
+        "codeatlas.writers.modules_md.module_groups",
+        "codeatlas.parsing.braces._relative",
+        "codeatlas.graph.symbol_table.resolve_relative",
+        "codeatlas.extractors.toolchain._mentions",
+        "codeatlas.writers.modules_md.group_index",
+        "codeatlas.navigator.api.op_module",
+        "codeatlas.graph.symbol_table.ModuleIndex.find_package"
+      ],
+      "hits5": 1,
+      "hits10": 1
+    },
+    {
+      "exclude": "tests.integration.test_cli.snapshot",
+      "gold": [
+        "tests.integration.test_hooks_mcp.snapshot"
+      ],
+      "top10": [
+        "tests.integration.test_hooks_mcp.snapshot",
+        "tests.integration.test_freshness.snapshot",
+        "tests.integration.test_prompt_hook.snapshot",
+        "tests.integration.test_integrations.snapshot",
+        "codeatlas.lifecycle._snapshot_from_disk",
+        "tests.benchmarks.agent_prepare.hashes",
+        "tests.integration.test_incremental.content",
+        "codeatlas.hooks.runner._root_from",
+        "codeatlas.audit.report._previous_snapshot",
+        "codeatlas.extractors.toolchain._python"
+      ],
+      "hits5": 1,
+      "hits10": 1
+    },
+    {
+      "exclude": "tests.integration.test_phase5.repo",
+      "gold": [
+        "tests.integration.test_viewer.repo"
+      ],
+      "top10": [
+        "tests.integration.test_viewer.repo",
+        "tests.integration.test_antigravity_hook.repo",
+        "tests.integration.test_prompt_hook.repo",
+        "tests.integration.test_audit.seeded",
+        "tests.conftest.small_repo",
+        "tests.integration.test_freshness.repo",
+        "tests.integration.test_refresh.repo",
+        "tests.integration.test_update_paths.repo",
+        "tests.conftest.tiny_repo",
+        "tests.integration.test_incremental.drift_repo"
+      ],
+      "hits5": 1,
+      "hits10": 1
+    },
+    {
+      "exclude": "tests.integration.test_doctor_session.enabled",
+      "gold": [
+        "tests.integration.test_freshness.repo",
+        "tests.integration.test_hooks_mcp.enabled",
+        "tests.integration.test_refresh.repo",
+        "tests.integration.test_semantic_task.indexed",
+        "tests.integration.test_surface_parity.enabled",
+        "tests.integration.test_update_paths.repo",
+        "tests.integration.test_worklog.enabled",
+        "tests.unit.test_task_pack.indexed"
+      ],
+      "top10": [
+        "tests.integration.test_hooks_mcp.enabled",
+        "tests.integration.test_surface_parity.enabled",
+        "tests.integration.test_worklog.enabled",
+        "tests.unit.test_feedback.enabled",
+        "tests.integration.test_freshness.repo",
+        "tests.integration.test_refresh.repo",
+        "tests.integration.test_update_paths.repo",
+        "tests.integration.test_semantic_task.indexed",
+        "tests.unit.test_task_pack.indexed",
+        "tests.integration.test_phase5.repo"
+      ],
+      "hits5": 4,
+      "hits10": 8
+    },
+    {
+      "exclude": "tests.integration.test_hooks_mcp.payload",
+      "gold": [
+        "tests.integration.test_worklog.payload"
+      ],
+      "top10": [
+        "tests.integration.test_worklog.payload",
+        "tests.integration.test_prompt_hook.payload",
+        "tests.integration.test_antigravity_hook.payload",
+        "tests.integration.test_gate_dedupe.read_payload",
+        "tests.integration.test_gate_dedupe.stop_payload",
+        "tests.integration.test_doctor_session.hook",
+        "codeatlas.hooks.runner.parse_payload",
+        "tests.integration.test_gate_dedupe.remember",
+        "codeatlas.integrations.base.dump_json",
+        "codeatlas.hooks.formats.render_context"
+      ],
+      "hits5": 1,
+      "hits10": 1
+    },
+    {
+      "exclude": "codeatlas.parsing.python_facts._dotted",
+      "gold": [
+        "codeatlas.parsing.smells._dotted"
+      ],
+      "top10": [
+        "codeatlas.parsing.smells._dotted",
+        "codeatlas.parsing.python_ast.dotted_name",
+        "codeatlas.parsing.treesitter.GoParser._dotted",
+        "codeatlas.mcp.server.CodeAtlasTools.codeatlas_locate",
+        "codeatlas.writers.__init__.__getattr__",
+        "codeatlas.navigator.context_pack._read_source",
+        "codeatlas.discovery.language.detect_language",
+        "codeatlas.mcp.server.CodeAtlasTools.codeatlas_task",
+        "codeatlas.parsing.treesitter.JavaScriptParser._dotted",
+        "tests.skills.test_skill_templates.test_skill_structure"
+      ],
+      "hits5": 1,
+      "hits10": 1
+    },
+    {
+      "exclude": "codeatlas.integrations.base._sha",
+      "gold": [
+        "codeatlas.writers.manifest.text_hash"
+      ],
+      "top10": [
+        "codeatlas.writers.manifest.text_hash",
+        "codeatlas.navigator.semantic._digest",
+        "codeatlas.writers.worklog._digest",
+        "codeatlas.health.git_intel._is_sha",
+        "codeatlas.discovery.scanner.hash_file",
+        "tests.integration.test_phase5.FakeEmbedder.embed",
+        "tests.benchmarks.agent_prepare.hashes",
+        "codeatlas.navigator.session._hashes",
+        "codeatlas.viewer.server.Watcher._file_hashes",
+        "tests.integration.test_trust_fixes.test_non_ascii_strings_are_found_exhaustively"
+      ],
+      "hits5": 1,
+      "hits10": 1
+    }
+  ],
+  "warm_query_seconds": [
+    0.02068790001794696,
+    0.030669800005853176,
+    0.026368599967099726,
+    0.02941119996830821,
+    0.032873000018298626,
+    0.026348199928179383,
+    0.023229600046761334,
+    0.012143000029027462,
+    0.024738999898545444,
+    0.022250200039707124,
+    0.024387600016780198,
+    0.017104399972595274,
+    0.022129900055006146,
+    0.01545490010175854,
+    0.025724299950525165,
+    0.02355619997251779,
+    0.013694799970835447,
+    0.012256500078365207,
+    0.018676299951039255,
+    0.020768599933944643,
+    0.016304900054819882,
+    0.018154399935156107,
+    0.012743200059048831,
+    0.01806639996357262,
+    0.013074400019831955,
+    0.012355500017292798,
+    0.026620099903084338,
+    0.0171585000352934,
+    0.014096500002779067,
+    0.02475480001885444
+  ],
+  "remote_code_trust": false,
+  "api_spend": 0
+}
