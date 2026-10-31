@@ -1,189 +1,237 @@
-# CODEATLAS
+<div align="center">
 
-**A persistent, local context layer for AI coding agents.**
+<h1>CodeAtlas</h1>
 
-CODEATLAS maps a codebase once, keeps that map fresh as the code changes, and lets any coding agent
-(Claude Code, Cursor, Codex, …) jump straight to the files, functions, and line ranges a task
-touches, instead of re-reading the repository at the start of every session.
+<p><strong>A persistent codebase map for AI coding agents.</strong></p>
 
-- **Local and offline.** No network calls, no API keys, no telemetry. Nothing leaves your machine.
-- **Deterministic.** The same code always produces the same `.aicontext/` bytes.
-- **Opt-in per project and per user.** Installing CODEATLAS changes nothing until you run `codeatlas init`.
-- **Agent-agnostic.** Plain JSON and Markdown artifacts, a CLI, an MCP server, and skills.
+<p>Find the relevant code. Follow its dependencies. Give your agent focused context.</p>
 
-> **CODEATLAS computes, the agent thinks.** CODEATLAS does deterministic static analysis and bookkeeping.
-> Anything that needs reasoning (writing the project brief, auditing code) is done by the coding
-> agent you already use, through skills and tools CODEATLAS installs. No extra service, no extra cost.
+<p>
+  <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white" alt="Python 3.10 or newer"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green" alt="MIT license"></a>
+  <a href="docs/agents.md"><img src="https://img.shields.io/badge/Integration-MCP-181818" alt="MCP integration"></a>
+  <a href="docs/architecture.md"><img src="https://img.shields.io/badge/Core-local%20%26%20deterministic-555555" alt="Local deterministic core"></a>
+</p>
 
----
+<p>
+  <a href="#quick-start">Quick start</a> &nbsp;·&nbsp;
+  <a href="#dashboard-and-code-graph">Dashboard</a> &nbsp;·&nbsp;
+  <a href="#agent-integrations">Integrations</a> &nbsp;·&nbsp;
+  <a href="docs/README.md">Documentation</a>
+</p>
 
-## Contents
+</div>
 
-- [Why CODEATLAS](#why-codeatlas)
-- [How it works](#how-it-works)
-- [Quick start](#quick-start)
-- [What you get](#what-you-get)
-- [Measured results](#measured-results)
-- [Command overview](#command-overview)
-- [Documentation](#documentation)
-- [Contributing](#contributing)
-- [License](#license)
+## What is CodeAtlas
 
-## Why CODEATLAS
+CodeAtlas builds a local index of your repository and turns it into useful context for a coding task. Instead of repeatedly exploring directories and opening entire files, an agent can request relevant symbols, source ranges, callers, tests, and the likely impact of a change.
 
-Every new agent session starts blind. To change one function, an agent typically lists
-directories, greps, opens whole files to find the function and its callers, and re-discovers
-conventions it learned yesterday. On a mid-sized repository this orientation tax is most of a
-session's tokens, and it is paid again every session.
+The index persists between sessions and updates incrementally as files change. Access it through the CLI, connect it to an agent through MCP and hooks, or explore it yourself in the browser dashboard.
 
-CODEATLAS becomes a permanent context window that lives next to the code. The agent's own context
-window becomes a small, focused working set loaded on demand:
+**The indexing and retrieval core runs without a language model or API key.** Your coding agent remains responsible for reasoning, editing, and executing tasks. Agent sessions use the agent provider's own authentication, network access, and usage limits.
 
-```mermaid
-flowchart LR
-    A[Session starts] --> B["Brief injected<br/>(≤ 600 tokens)"]
-    B --> C["codeatlas search<br/>'discount coupon sale'"]
-    C --> D["codeatlas context<br/>apply_discount"]
-    D --> E["Read only the<br/>listed line ranges"]
-    E --> F[Edit + run the<br/>listed tests]
-    F --> G["Hook: codeatlas update<br/>(index stays fresh)"]
-    G -. next task .-> C
+## Capabilities
+
+| Capability | What you can do |
+| --- | --- |
+| **Task context** | Turn a request into a context packet containing relevant code, exact matches, call sites, tests, and impact information within a token budget. |
+| **Persistent indexing** | Keep symbols, imports, calls, and extracted project facts available across sessions; update changed files incrementally. |
+| **Dependency exploration** | Follow callers and callees, inspect important symbols, and estimate which code a change may affect. |
+| **Agent integration** | Expose the same context engine through CLI commands, an MCP server, hooks, and workflow skills. |
+| **Local dashboard** | Manage projects, preview context, inspect repository status, and navigate a live code graph. |
+| **Live comparisons** | Compare agent runs with and without CodeAtlas in separate project copies, with output, available usage metrics, and verification results. |
+| **Audit workflows** | Prepare review plans, record evidence, and produce reports using your existing coding agent. |
+| **Graph exports** | Export graph data as HTML, an Obsidian vault, Mermaid, DOT, GraphML, or JSON. |
+
+## Quick start
+
+### 1. Install from source
+
+You need **Python 3.10 or newer** and Git to clone the repository. A Node.js installation is only needed when developing the frontend; the Python package includes built dashboard assets.
+
+```bash
+git clone https://github.com/priy-anshugupta/CodeAtlas.git
+cd CodeAtlas
+python -m venv .venv
 ```
+
+Activate the environment:
+
+```powershell
+# Windows PowerShell
+.\.venv\Scripts\Activate.ps1
+```
+
+```bash
+# macOS / Linux
+source .venv/bin/activate
+```
+
+Install CodeAtlas, including the optional JavaScript, TypeScript, Go, and Java parsers:
+
+```bash
+python -m pip install -e ".[treesitter]"
+codeatlas --version
+```
+
+For a minimal installation, use `python -m pip install -e .`. Python parsing is included. Optional parser and embedding extras are listed in [pyproject.toml](pyproject.toml).
+
+### 2. Enable a repository
+
+Change to the project you want to index, then run:
+
+```bash
+cd /path/to/your-project
+codeatlas init
+codeatlas status
+```
+
+The interactive setup previews its changes and asks for confirmation. It can create `.aicontext/`, record your local consent, install selected agent integrations, and run the first scan. If you skip that scan, run `codeatlas scan` when ready.
+
+### 3. Retrieve context and open the dashboard
+
+```bash
+codeatlas task "Find where discount rules are applied and which tests cover them"
+codeatlas search "discount coupon"
+codeatlas view
+```
+
+Open the **complete local URL printed by `codeatlas view`**. It includes the authentication information needed to access the dashboard.
+
+For symbol-level exploration, replace the example below with a symbol from your own project:
+
+```bash
+codeatlas context shop.pricing.discounts.apply_discount
+codeatlas impact shop.pricing.discounts.apply_discount
+```
+
+See the [getting started guide](docs/getting-started.md) for setup options and example output.
 
 ## How it works
 
 ```mermaid
-flowchart TB
-    SRC[(Source files)] --> CORE["<b>CODEATLAS core</b> (deterministic, no LLM)<br/>discovery → parsing → symbols + graphs → extractors →<br/>health + git → drift → writers"]
-    CORE --> AC[(".aicontext/<br/>JSON + Markdown")]
-    AC --> NAV["Navigator<br/>search · locate · context · impact"]
-    AC --> BOOK["Narrator + Auditor<br/>brief staleness · audit plan · findings"]
-    NAV --> SURF["Surfaces<br/>CLI · MCP server · hooks · skills · graph viewer"]
-    BOOK --> SURF
-    SURF <--> AGENT["Your coding agent<br/>(Claude Code, Cursor, Codex …)<br/>does all the reasoning"]
+flowchart LR
+    A[Source files] --> B[Static analysis]
+    B --> C[Symbols and dependency graphs]
+    C --> D[Persistent local index]
+    D --> E[Task context engine]
+    E --> F[CLI and MCP]
+    E --> G[Dashboard and code graph]
+    F --> H[Coding agent]
+    H --> I[Edits and verification]
+    I --> J[Incremental index updates]
+    J --> D
 ```
 
-CODEATLAS has five pillars:
+CodeAtlas discovers files, parses supported languages, builds symbol and dependency graphs, and extracts facts such as routes, models, configuration, and test relationships. It stores readable JSON and Markdown artifacts in `.aicontext/`, with disposable caches for queries.
 
-| Pillar | What it does | Who does the work |
-|---|---|---|
-| **Index** | Symbols, call and import graphs, PageRank importance, routes, models, config keys, tests map, health, git history | CODEATLAS |
-| **Navigator** | Budgeted *context packs*: exact location, callers, callees, tests, blast radius, a read list | CODEATLAS |
-| **Narrator** | `AGENTS.md` brief and module summaries: CODEATLAS writes the facts, your agent writes the prose | CODEATLAS + agent |
-| **Auditor** | Prioritized audit plan, finding store and reports; your agent reviews code and proves findings | CODEATLAS + agent |
-| **Visualizer** | Interactive, Obsidian-style graph of the codebase in the browser, with live updates | CODEATLAS |
+Task retrieval combines literal matches, ranked search, and graph relationships. The agent gets a bounded working set rather than an unrestricted dump of the repository. Queries check index freshness, and supported hooks can refresh it after edits.
 
-Read the [architecture guide](docs/architecture.md) for the full picture.
+Read the [architecture guide](docs/architecture.md) and [context engine guide](docs/context-engine.md) for implementation details.
 
-## Quick start
+## Dashboard and code graph
 
-Requirements: Python 3.10+. Git is optional (it enables churn, ownership and co-change data).
+Run `codeatlas view` from an indexed repository to open the workspace.
+
+| View | Purpose |
+| --- | --- |
+| **Projects** | Add a local folder or download a Git repository, index it, and select the active project. |
+| **Repository** | Check the source branch, index coverage, freshness, and repository status. |
+| **Context** | Preview task context as readable text or JSON before using it with an agent. |
+| **Graph** | Explore packages, files, and symbols; inspect relationships and switch between network and layer layouts. |
+| **Live** | Run a paired comparison and follow agent activity, terminal output, timers, and available token counts. |
+| **Compare and Runs** | Inspect recorded results, verification outcomes, and exported evidence. |
+| **Settings** | Inspect agent executable detection and integration capabilities. |
+
+Live comparisons support panels for **up to three projects**. Each paired run uses separate source copies, with CodeAtlas enabled in one copy. The dashboard exposes verification results alongside usage so that a lower token count is not mistaken for a successful solution.
+
+Agent executables and authentication must be available locally. Usage fields and execution capabilities differ by agent; unavailable metrics should not be treated as zero. Agent runs may consume your provider quota.
+
+See [dashboard setup and comparison workflows](docs/dashboard.md) for requirements, sandbox behaviour, and measurement details.
+
+## Agent integrations
+
+CodeAtlas includes integrations for **Claude Code, Codex, Cursor, Gemini CLI, and Antigravity**. The supported delivery mechanism varies by host.
+
+- **CLI:** retrieve context directly with `codeatlas task`, `search`, `context`, and `impact`.
+- **MCP:** expose context tools to compatible coding agents through `codeatlas mcp`.
+- **Hooks:** supply context or update the index automatically where the host supports the configured hook.
+- **Skills:** provide workflows for context retrieval, project refresh, audits, and recorded decisions.
+
+Choose an integration during `codeatlas init`. See [agent configuration](docs/agents.md) for host-specific setup and limitations. A configured integration should be checked for successful delivery before its results are compared.
+
+## Command reference
+
+| Workflow | Commands |
+| --- | --- |
+| Setup and diagnostics | `init`, `enable`, `disable`, `pause`, `resume`, `doctor` |
+| Index maintenance | `scan`, `update`, `status`, `watch`, `migrate` |
+| Code navigation | `task`, `brief`, `search`, `locate`, `context`, `impact`, `module`, `trace` |
+| Project knowledge | `refresh`, `decision`, `note`, `recall` |
+| Code review | `audit plan`, `audit record`, `audit update`, `audit report` |
+| Visualization | `view`, `graph export` |
+| Agent interfaces | `mcp`, `hook` |
+
+Run `codeatlas --help` or consult the [full CLI reference](docs/cli.md).
+
+## Evaluation and limitations
+
+The repository includes a repeatable [orientation-token harness](tests/benchmarks/tokens.py), retrieval evaluations, and live-run measurement tools.
+
+The recorded offline harness results include:
+
+| Evaluation subject | Without context layer | With context layer | Change in estimated orientation tokens |
+| --- | ---: | ---: | ---: |
+| Django and React application, 305 files, 12 tasks | 356,657 | 28,202 | 92% fewer |
+| Tool source snapshot, 140 files, 10 tasks | 105,846 | 28,981 | 73% fewer |
+| Small fixture, 12 files | 1,115 | 3,136 | 181% more |
+
+These are **recorded harness results**, not a fresh benchmark of this renamed release or a guarantee for your repository. The offline counts estimate orientation context; they do not establish provider billing, task correctness, or end-to-end speed. Small repositories can incur more overhead than they save.
+
+For a useful live comparison, keep the task, source snapshot, agent configuration, and verification criteria comparable. Check successful context delivery and task completion before interpreting a token difference. See [benchmark methodology](docs/benchmarks.md).
+
+## Development
+
+From the CodeAtlas checkout, with your virtual environment activated:
 
 ```bash
-# Install (PyPI release pending; install from GitHub meanwhile)
-pip install -e .
-
-cd your-repo
-codeatlas init        # shows every file it will create or change and asks first
-codeatlas status      # consent state, index freshness, drift
+python -m pip install -e ".[dev,treesitter]"
+python -m pytest
+python -m ruff check .
+python -m mypy codeatlas
 ```
 
-`codeatlas init` creates `.aicontext/`, adds its cache paths to `.gitignore`, records a local
-per-user enable flag in `~/.config/codeatlas/repos.toml`, optionally installs agent integrations
-(skills, hooks, MCP entry), and offers to run the first scan.
-
-Then explore:
+To develop the frontend, use the Node.js version specified in the [contributing guide](CONTRIBUTING.md):
 
 ```bash
-codeatlas search "discount applied twice"
-codeatlas context pricing.discounts.apply_discount
-codeatlas impact pricing.discounts.apply_discount
-codeatlas view        # the interactive graph in your browser
+cd viewer
+npm ci
+npm run build
+npm test
 ```
 
-Optional extras:
-
-```bash
-pip install "codeatlas-ctx[treesitter]"   # JavaScript, TypeScript, Go and Java parsing
-pip install "codeatlas-ctx[semantic]"     # local embeddings for `codeatlas search --semantic`
-```
-
-See [Getting started](docs/getting-started.md) for a guided walkthrough.
-
-## What you get
-
-**For the agent**
-- A compact session brief (languages, how to run tests and lint, how to use CODEATLAS; about 100-150 tokens).
-- The code a request needs, added to the prompt before the model's first turn (Claude Code, Codex,
-  Gemini CLI), or one `codeatlas task` call away: the matching code, every exact string match, call
-  sites, tests and impact, within a token budget. Follow-ups via `context` / `impact`.
-- Skills that teach the agent the workflow: `codeatlas-context`, `codeatlas-refresh`, `codeatlas-audit`, `codeatlas-decisions`.
-- An index that is current whether or not your agent has hooks: every answer first checks the
-  working tree, and hooks update it in the background after edits.
-
-**For you**
-- `codeatlas view`: a zoomable graph from packages down to functions. Click any node for its
-  signature, callers, callees, tests, risk and history; watch the agent's reads and edits light
-  up live. Keyboard-accessible, dark and light themes, fully offline.
-- `codeatlas audit`: an evidence-based audit run by your own agent, with a report that diffs against
-  the previous audit.
-- Exports: self-contained HTML, an Obsidian vault, Mermaid, DOT, GraphML, JSON.
-
-## Measured results
-
-From the repeatable harness in [`tests/benchmarks/tokens.py`](tests/benchmarks/tokens.py),
-counting tokens an agent reads to orient itself for realistic bug-fix requests
-(details and caveats in [Benchmarks](docs/benchmarks.md)):
-
-| Repository | Size | Without CODEATLAS | With CODEATLAS | Saved |
-|---|---|---:|---:|---:|
-| Django + React web app, 12 tasks, full session | 305 files · 50k lines | 356,657 | 28,202 | **92%** |
-| CODEATLAS itself, 10 tasks, full session | 140 files · 20k lines | 105,846 | 28,981 | **73%** |
-| 12-file fixture | 119 lines | 1,115 | 3,136 | −181% |
-
-These harness counts estimate context volume; task completion and provider billing need
-separate measurement. Tiny repositories can pay more for the brief/search/packet workflow
-than simply reading their files. End-to-end latency includes launcher, freshness and cache
-work and varies substantially from warm query timings.
-
-## Command overview
-
-| Area | Commands |
-|---|---|
-| Setup and consent | `init` · `enable` / `disable` · `pause` / `resume` · `uninstall-integration` · `install --global` · `doctor` |
-| Index | `scan` · `update` · `status` · `watch` · `migrate` |
-| Navigation | `task` · `brief` · `search` · `locate` · `context` · `impact` · `module` · `trace` |
-| Narrative | `refresh prepare` · `refresh commit` · `decision add/list/show/search` |
-| Audit | `audit plan` · `audit record` · `audit update` · `audit report` |
-| Graph | `view` · `graph export` |
-| Agent plumbing | `mcp` · `hook session-start` · `hook user-prompt` · `hook post-edit` |
-
-Full reference: [CLI](docs/cli.md).
+The frontend build writes the packaged assets to `codeatlas/viewer_dist/`. Changes to frontend source should include the rebuilt assets.
 
 ## Documentation
 
-| Guide | What it covers |
-|---|---|
-| [Getting started](docs/getting-started.md) | Install, enable a repo, the daily workflow |
-| [Architecture](docs/architecture.md) | Pipeline, incremental updates, package layout, design principles |
-| [Local context engine](docs/context-engine.md) | Task compilation, CLI/MCP parity, persistent knowledge and session reuse |
-| [CLI reference](docs/cli.md) | Every command and option, exit codes |
-| [The `.aicontext/` directory](docs/aicontext.md) | Artifacts, schemas, the `AGENTS.md` format |
-| [Agent integrations](docs/agents.md) | Claude Code, Cursor, Codex, Gemini CLI, Antigravity, MCP tools, hooks, the consent model |
-| [Graph viewer](docs/viewer.md) | Using `codeatlas view`, shortcuts, exports, API and security |
-| [Auditing](docs/audit.md) | The agent-driven audit workflow and finding schema |
-| [Configuration](docs/configuration.md) | `[tool.codeatlas]` settings and environment variables |
-| [Benchmarks](docs/benchmarks.md) | How token savings and latency are measured, and results |
-| [Troubleshooting](docs/troubleshooting.md) | Common problems and `codeatlas doctor` |
-| [Decision records](docs/adr) | Why things are built the way they are |
+| Guide | Covers |
+| --- | --- |
+| [Getting started](docs/getting-started.md) | Installation, consent, first index, and everyday use |
+| [Architecture](docs/architecture.md) | Parsing, graphs, indexing, and incremental updates |
+| [Context engine](docs/context-engine.md) | Retrieval, bounded packets, and persistent knowledge |
+| [Agent integrations](docs/agents.md) | MCP, hooks, skills, and supported hosts |
+| [Dashboard](docs/dashboard.md) | Projects, live comparisons, and recorded output |
+| [Graph viewer](docs/viewer.md) | Graph exploration, keyboard controls, and exports |
+| [Configuration](docs/configuration.md) | Project settings and environment variables |
+| [Index artifacts](docs/aicontext.md) | The `.aicontext/` layout and schemas |
+| [Auditing](docs/audit.md) | Review plans, evidence, and findings |
+| [Benchmarks](docs/benchmarks.md) | Evaluation design and measurement caveats |
+| [Troubleshooting](docs/troubleshooting.md) | Diagnostics and common setup issues |
 
 ## Contributing
 
-Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) for the development setup,
-the checks every change must pass, and the design rules CODEATLAS will not bend (offline, no API
-keys, deterministic output, opt-in). Please follow the [Code of Conduct](CODE_OF_CONDUCT.md),
-and report security issues as described in [SECURITY.md](SECURITY.md).
+Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request. Include the checks relevant to your change and keep source changes separate from generated files where practical. Please follow the [Code of Conduct](CODE_OF_CONDUCT.md) and use the [security policy](SECURITY.md) for vulnerability reports.
 
 ## License
 
-[MIT](LICENSE).
+CodeAtlas is distributed under the [MIT license](LICENSE).
