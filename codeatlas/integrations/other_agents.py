@@ -1,0 +1,170 @@
+"""Cursor, and the generic fallback for any agent that reads a root AGENTS.md."""
+
+from __future__ import annotations
+
+import copy
+from pathlib import Path
+from typing import Any
+
+from codeatlas.integrations.base import (
+    FileChange,
+    Integration,
+    IntegrationOptions,
+    dump_json,
+    load_json,
+    read_text,
+    with_block,
+    without_block,
+)
+from codeatlas.integrations.common import (
+    INSTRUCTION_BLOCK,
+    MCP_ENTRY,
+    instruction_block,
+    skill_body,
+    skill_description,
+)
+from codeatlas.integrations.hooks_json import add_hooks, strip_hooks
+
+CURSOR_RULE = ".cursor/rules/codeatlas.mdc"
+CURSOR_MCP = ".cursor/mcp.json"
+CURSOR_HOOKS = ".cursor/hooks.json"
+AGENTS_MD = "AGENTS.md"
+MANAGED = "<!-- codeatlas-managed: installed and updated by `codeatlas init`. Local edits are overwritten on upgrade. -->"
+# Procedures an agent needs only now and then are rules it asks for by description, so they cost
+# nothing in a session that never audits, refreshes or records a decision.
+CURSOR_PROCEDURES = ("codeatlas-audit", "codeatlas-refresh", "codeatlas-decisions")
+
+CURSOR_HOOKS_ENTRIES: dict[str, dict[str, Any]] = {
+    "sessionStart": {"command": "codeatlas hook session-start --format cursor"},
+    "afterFileEdit": {"command": "codeatlas hook post-edit"},
+}
+
+
+def cursor_rule(mcp: bool = False) -> str:
+    """The always-on rule: only how to start a task. Short, because it is sent on every turn."""
+    return (
+        "---\n"
+        "description: CODEATLAS code index - context for unknown code\n"
+        "alwaysApply: true\n"
+        "---\n"
+        f"{MANAGED}\n\n"
+        f"{instruction_block(mcp)}"
+    )
+
+
+def cursor_procedure(name: str) -> str:
+    return (
+        "---\n"
+        f"description: {skill_description(name)}\n"
+        "alwaysApply: false\n"
+        "---\n"
+        f"{MANAGED}\n\n"
+        f"{skill_body(name)}"
+    )
+
+
+def _procedure_path(name: str) -> str:
+    return f".cursor/rules/{name}.mdc"
+
+
+class CursorIntegration(Integration):
+    name = "cursor"
+
+    def detect(self, root: Path) -> bool:
+        return (root / ".cursor").is_dir() or (root / ".cursorrules").is_file()
+
+    def plan(self, root: Path, options: IntegrationOptions) -> list[FileChange]:
+        changes = [FileChange(CURSOR_RULE, cursor_rule(options.mcp), "always-on CODEATLAS rule")]
+        changes += [
+            FileChange(_procedure_path(n), cursor_procedure(n), f"{n} rule (on request)")
+            for n in CURSOR_PROCEDURES
+        ]
+        if options.mcp:
+            mcp = copy.deepcopy(load_json(root / CURSOR_MCP))
+            mcp.setdefault("mcpServers", {})["codeatlas"] = MCP_ENTRY
+            changes.append(FileChange(CURSOR_MCP, dump_json(mcp), "MCP server `codeatlas mcp` (stdio)"))
+        hooks = load_json(root / CURSOR_HOOKS)
+        if options.hooks:
+            merged = add_hooks(hooks, CURSOR_HOOKS_ENTRIES)
+            # A fixed key order, so installing twice writes the same bytes.
+            new = {"version": merged.get("version", 1)}
+            new.update({k: v for k, v in merged.items() if k != "version"})
+            changes.append(
+                FileChange(CURSOR_HOOKS, dump_json(new), "hooks: sessionStart, afterFileEdit")
+            )
+        elif hooks:
+            changes.append(FileChange(CURSOR_HOOKS, dump_json(strip_hooks(hooks)), "CODEATLAS hooks"))
+        return [c for c in changes if not c.is_noop(root)]
+
+    def plan_removal(self, root: Path) -> list[FileChange]:
+        changes = [
+            FileChange(path, None, "CODEATLAS rule")
+            for path in (CURSOR_RULE, *(_procedure_path(n) for n in CURSOR_PROCEDURES))
+            if (root / path).is_file()
+        ]
+        if (root / CURSOR_MCP).is_file():
+            mcp = copy.deepcopy(load_json(root / CURSOR_MCP))
+            servers = mcp.get("mcpServers", {})
+            if isinstance(servers, dict):
+                servers.pop("codeatlas", None)
+                if not servers:
+                    mcp.pop("mcpServers", None)
+            changes.append(
+                FileChange(CURSOR_MCP, dump_json(mcp) if mcp else None, "CODEATLAS MCP server")
+            )
+        if (root / CURSOR_HOOKS).is_file():
+            remaining = strip_hooks(load_json(root / CURSOR_HOOKS))
+            empty = not (set(remaining) - {"version"})
+            changes.append(
+                FileChange(CURSOR_HOOKS, None if empty else dump_json(remaining), "CODEATLAS hooks")
+            )
+        return [c for c in changes if not c.is_noop(root)]
+
+    def status(self, root: Path) -> list[tuple[str, bool | None, str]]:
+        out: list[tuple[str, bool | None, str]] = []
+        rule = read_text(root / CURSOR_RULE)
+        if rule is not None:
+            out.append(
+                (
+                    "cursor rule",
+                    rule in (cursor_rule(), cursor_rule(True)),
+                    ".cursor/rules/codeatlas.mdc installed",
+                )
+            )
+        hooks = read_text(root / CURSOR_HOOKS)
+        if hooks is not None:
+            both = "codeatlas hook session-start" in hooks and "codeatlas hook post-edit" in hooks
+            out.append(
+                (
+                    "cursor hooks",
+                    True if both else None,
+                    "sessionStart and afterFileEdit installed"
+                    if both
+                    else "not installed (optional)",
+                )
+            )
+        return out
+
+
+class AgentsMdIntegration(Integration):
+    """Any agent that reads a root AGENTS.md: the generic fallback."""
+
+    def __init__(self, name: str = "generic") -> None:
+        self.name = name
+
+    def detect(self, root: Path) -> bool:
+        return False
+
+    def plan(self, root: Path, options: IntegrationOptions) -> list[FileChange]:
+        change = FileChange(
+            AGENTS_MD,
+            with_block(read_text(root / AGENTS_MD), INSTRUCTION_BLOCK),
+            "CODEATLAS instruction block",
+        )
+        return [] if change.is_noop(root) else [change]
+
+    def plan_removal(self, root: Path) -> list[FileChange]:
+        if not (root / AGENTS_MD).is_file():
+            return []
+        change = FileChange(AGENTS_MD, without_block(read_text(root / AGENTS_MD)), "CODEATLAS block")
+        return [] if change.is_noop(root) else [change]
