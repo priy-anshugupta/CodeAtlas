@@ -1,0 +1,169 @@
+"""Claude Code: skills, hooks in `.claude/settings.json`, `.mcp.json`, CLAUDE.md block.
+
+Hook format (Claude Code settings): `hooks.<Event>` is a list of
+`{"matcher": str, "hooks": [{"type": "command", "command": str, "timeout": secs}]}`.
+CODEATLAS's entries are recognised by their `codeatlas hook` command.
+"""
+
+from __future__ import annotations
+
+import copy
+from pathlib import Path
+from typing import Any
+
+from codeatlas.integrations.base import (
+    FileChange,
+    Integration,
+    IntegrationOptions,
+    dump_json,
+    load_json,
+    read_text,
+    with_block,
+    without_block,
+)
+from codeatlas.integrations.common import (
+    MCP_ENTRY,
+    SKILL_NAMES,
+    instruction_block,
+    skill_files,
+)
+from codeatlas.integrations.hooks_json import add_hooks, strip_hooks
+
+SETTINGS = ".claude/settings.json"
+MCP_JSON = ".mcp.json"
+CLAUDE_MD = "CLAUDE.md"
+
+HOOKS: dict[str, dict[str, Any]] = {
+    "SessionStart": {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [{"type": "command", "command": "codeatlas hook session-start", "timeout": 10}],
+    },
+    "UserPromptSubmit": {
+        "hooks": [{"type": "command", "command": "codeatlas hook user-prompt", "timeout": 20}],
+    },
+    "PostToolUse": {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [{"type": "command", "command": "codeatlas hook post-edit", "timeout": 5}],
+    },
+    "Stop": {
+        "hooks": [{"type": "command", "command": "codeatlas hook stop", "timeout": 20}],
+    },
+}
+DEDUPE_HOOK: dict[str, dict[str, Any]] = {
+    "PreToolUse": {
+        "matcher": "Read",
+        "hooks": [{"type": "command", "command": "codeatlas hook dedupe-read", "timeout": 5}],
+    },
+}
+
+
+# A second PostToolUse entry: Bash output is shortened (failures kept) before Claude reads it.
+SHORTEN_HOOK: dict[str, Any] = {
+    "matcher": "Bash",
+    "hooks": [{"type": "command", "command": "codeatlas hook shorten-output", "timeout": 10}],
+}
+
+
+def _json_change(root: Path, rel: str, data: dict[str, Any], detail: str) -> FileChange:
+    return FileChange(rel, dump_json(data) if data else None, detail)
+
+
+class ClaudeCodeIntegration(Integration):
+    name = "claude-code"
+
+    def detect(self, root: Path) -> bool:
+        return (root / ".claude").is_dir() or (root / CLAUDE_MD).is_file()
+
+    def plan(self, root: Path, options: IntegrationOptions) -> list[FileChange]:
+        names = SKILL_NAMES if options.all_skills else SKILL_NAMES[:1]
+        changes = [
+            FileChange(f".claude/skills/{name}/{relative}", content, f"{name} skill resource")
+            for name in names
+            for relative, content in skill_files(name)
+        ]
+        settings = load_json(root / SETTINGS)
+        wanted = {**HOOKS, **(DEDUPE_HOOK if options.dedupe_reads else {})}
+        if options.dedupe_reads:
+            wanted = copy.deepcopy(wanted)
+            wanted["PostToolUse"]["matcher"] = "Edit|Write|MultiEdit|Read"
+            wanted["PostToolUse"]["hooks"].append(
+                {"type": "command", "command": "codeatlas hook dedupe-read", "timeout": 5}
+            )
+            wanted["SessionStart"]["hooks"].append(
+                {"type": "command", "command": "codeatlas hook dedupe-read", "timeout": 5}
+            )
+        entries: dict[str, Any] = dict(wanted)
+        if options.shorten_output:
+            entries["PostToolUse"] = [wanted["PostToolUse"], SHORTEN_HOOK]
+        new_settings = add_hooks(settings, entries) if options.hooks else strip_hooks(settings)
+        if new_settings != settings or options.hooks:
+            changes.append(
+                _json_change(
+                    root,
+                    SETTINGS,
+                    new_settings,
+                    "hooks: SessionStart, UserPromptSubmit, PostToolUse(Edit|Write|MultiEdit), Stop",
+                )
+            )
+        mcp = load_json(root / MCP_JSON)
+        if options.mcp:
+            new_mcp = copy.deepcopy(mcp)
+            # Loaded upfront: behind ToolSearch every first lookup costs an extra model call.
+            new_mcp.setdefault("mcpServers", {})["codeatlas"] = {**MCP_ENTRY, "alwaysLoad": True}
+            changes.append(_json_change(root, MCP_JSON, new_mcp, "MCP server `codeatlas mcp` (stdio)"))
+        changes.append(
+            FileChange(
+                CLAUDE_MD,
+                with_block(read_text(root / CLAUDE_MD), instruction_block(options.mcp)),
+                "short CODEATLAS instruction block",
+            )
+        )
+        return [c for c in changes if not c.is_noop(root)]
+
+    def plan_removal(self, root: Path) -> list[FileChange]:
+        changes = [
+            FileChange(f".claude/skills/{name}/{relative}", None, f"{name} skill resource")
+            for name in SKILL_NAMES
+            for relative, _ in skill_files(name)
+            if (root / f".claude/skills/{name}/{relative}").is_file()
+        ]
+        if (root / SETTINGS).is_file():
+            changes.append(
+                _json_change(root, SETTINGS, strip_hooks(load_json(root / SETTINGS)), "CODEATLAS hooks")
+            )
+        if (root / MCP_JSON).is_file():
+            mcp = copy.deepcopy(load_json(root / MCP_JSON))
+            servers = mcp.get("mcpServers", {})
+            if isinstance(servers, dict):
+                servers.pop("codeatlas", None)
+                if not servers:
+                    mcp.pop("mcpServers", None)
+            changes.append(_json_change(root, MCP_JSON, mcp, "CODEATLAS MCP server"))
+        if (root / CLAUDE_MD).is_file():
+            changes.append(
+                FileChange(CLAUDE_MD, without_block(read_text(root / CLAUDE_MD)), "CODEATLAS block")
+            )
+        return [c for c in changes if not c.is_noop(root)]
+
+    def status(self, root: Path) -> list[tuple[str, bool | None, str]]:
+        out: list[tuple[str, bool | None, str]] = []
+        settings = read_text(root / SETTINGS)
+        if settings is not None:
+            installed = [
+                h
+                for h in ("session-start", "user-prompt", "post-edit")
+                if f"codeatlas hook {h}" in settings
+            ]
+            out.append(
+                (
+                    "claude hooks",
+                    True if len(installed) == 3 else None,
+                    ", ".join(installed) + " installed"
+                    if installed
+                    else "not installed (optional)",
+                )
+            )
+        mcp = read_text(root / MCP_JSON)
+        if mcp is not None:
+            out.append(("claude mcp", '"codeatlas"' in mcp, ".mcp.json registers `codeatlas mcp`"))
+        return out
