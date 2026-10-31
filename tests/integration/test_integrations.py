@@ -1,0 +1,438 @@
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+from codeatlas.integrations import IntegrationOptions, detect_agents
+from codeatlas.integrations.global_note import install_global, uninstall_global
+from codeatlas.lifecycle import apply_init, apply_uninstall, plan_init, plan_uninstall
+
+if sys.version_info >= (3, 11):
+    import tomllib
+else:  # pragma: no cover
+    import tomli as tomllib
+
+
+def snapshot(root: Path) -> dict[str, bytes]:
+    return {
+        p.relative_to(root).as_posix(): p.read_bytes()
+        for p in root.rglob("*")
+        if p.is_file()
+        and ".aicontext" not in p.relative_to(root).parts
+        and ".git" not in p.relative_to(root).parts
+    }
+
+
+def install(root: Path, agent: str, **opts: bool) -> None:
+    apply_init(plan_init(root, [agent], IntegrationOptions(**opts)))
+
+
+def test_detect_agents(tmp_path: Path) -> None:
+    assert detect_agents(tmp_path) == ["generic"]
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".cursor").mkdir()
+    assert detect_agents(tmp_path) == ["claude-code", "cursor"]
+
+
+def test_claude_code_install_contents(tiny_repo: Path) -> None:
+    install(tiny_repo, "claude-code")
+    # Only the context skill by default: every skill's description sits in context on every call.
+    skills = tiny_repo / ".claude" / "skills"
+    assert [p.name for p in skills.iterdir()] == ["codeatlas-context"]
+    text = (skills / "codeatlas-context" / "SKILL.md").read_text(encoding="utf-8")
+    assert "codeatlas-managed" in text and "name: codeatlas-context" in text
+    stop = json.loads((tiny_repo / ".claude" / "settings.json").read_text())["hooks"]["Stop"][0]
+    assert stop["hooks"][0]["command"] == "codeatlas hook stop"
+    settings = json.loads((tiny_repo / ".claude" / "settings.json").read_text())
+    session = settings["hooks"]["SessionStart"][0]
+    assert session["hooks"][0]["command"] == "codeatlas hook session-start"
+    prompt = settings["hooks"]["UserPromptSubmit"][0]
+    assert prompt["hooks"][0]["command"] == "codeatlas hook user-prompt"
+    assert "matcher" not in prompt  # UserPromptSubmit has no matcher
+    post = settings["hooks"]["PostToolUse"][0]
+    assert post["matcher"] == "Edit|Write|MultiEdit"
+    assert post["hooks"][0]["command"] == "codeatlas hook post-edit"
+    mcp = json.loads((tiny_repo / ".mcp.json").read_text())
+    # Loaded upfront, so the first lookup needs no ToolSearch call.
+    assert mcp["mcpServers"]["codeatlas"] == {"command": "codeatlas", "args": ["mcp"], "alwaysLoad": True}
+    claude_md = (tiny_repo / "CLAUDE.md").read_text()
+    assert claude_md.startswith("<!-- codeatlas-managed:start -->")
+    from codeatlas.instructions import CONSENT
+
+    assert CONSENT in claude_md
+
+
+def test_install_is_idempotent_and_merges_user_config(tiny_repo: Path) -> None:
+    (tiny_repo / ".claude").mkdir()
+    user_settings = {
+        "permissions": {"allow": ["Bash(ls)"]},
+        "hooks": {
+            "PostToolUse": [
+                {"matcher": "Bash", "hooks": [{"type": "command", "command": "echo hi"}]}
+            ]
+        },
+    }
+    (tiny_repo / ".claude" / "settings.json").write_text(json.dumps(user_settings))
+    (tiny_repo / ".mcp.json").write_text(json.dumps({"mcpServers": {"other": {"command": "x"}}}))
+    (tiny_repo / "CLAUDE.md").write_text("# My rules\n\nBe nice.\n")
+    install(tiny_repo, "claude-code")
+    settings = json.loads((tiny_repo / ".claude" / "settings.json").read_text())
+    assert settings["permissions"] == {"allow": ["Bash(ls)"]}
+    commands = [h["hooks"][0]["command"] for h in settings["hooks"]["PostToolUse"]]
+    assert commands == ["echo hi", "codeatlas hook post-edit"]
+    assert set(json.loads((tiny_repo / ".mcp.json").read_text())["mcpServers"]) == {
+        "other",
+        "codeatlas",
+    }
+    assert (tiny_repo / "CLAUDE.md").read_text().startswith("# My rules\n\nBe nice.\n")
+
+    before = snapshot(tiny_repo)
+    plan = plan_init(tiny_repo, ["claude-code"], IntegrationOptions())
+    assert plan.file_changes == ()
+    install(tiny_repo, "claude-code")
+    assert snapshot(tiny_repo) == before
+
+
+def test_uninstall_restores_original_bytes(tiny_repo: Path) -> None:
+    (tiny_repo / ".claude").mkdir()
+    (tiny_repo / ".claude" / "settings.json").write_text('{"model":   "x"}\n')
+    (tiny_repo / "CLAUDE.md").write_text("# Mine\r\n")
+    before = snapshot(tiny_repo)
+    install(tiny_repo, "claude-code")
+    assert snapshot(tiny_repo) != before
+    apply_uninstall(tiny_repo, plan_uninstall(tiny_repo))
+    after = snapshot(tiny_repo)
+    # .gitignore lines belong to the index itself (init), not the integration; --purge removes them.
+    after.pop(".gitignore")
+    assert after == before
+
+
+def test_uninstall_is_surgical_after_user_edits(tiny_repo: Path) -> None:
+    install(tiny_repo, "claude-code")
+    claude_md = tiny_repo / "CLAUDE.md"
+    claude_md.write_text(claude_md.read_text() + "\n# Added later by the user\n")
+    apply_uninstall(tiny_repo, plan_uninstall(tiny_repo))
+    assert claude_md.read_text() == "# Added later by the user\n"
+    assert not (tiny_repo / ".mcp.json").exists()
+    assert not any((tiny_repo / ".claude" / "skills" / "codeatlas-context").rglob("*.md"))
+
+
+def test_opt_outs(tiny_repo: Path) -> None:
+    install(tiny_repo, "claude-code", hooks=False, mcp=False)
+    assert not (tiny_repo / ".mcp.json").exists()
+    assert not (tiny_repo / ".claude" / "settings.json").exists()
+    assert (tiny_repo / ".claude" / "skills" / "codeatlas-context" / "SKILL.md").is_file()
+    assert not (tiny_repo / ".claude" / "skills" / "codeatlas-audit").exists()
+
+
+def test_all_skills_and_dedupe_reads_are_opt_in(tiny_repo: Path) -> None:
+    install(tiny_repo, "claude-code", all_skills=True, dedupe_reads=True)
+    names = sorted(p.name for p in (tiny_repo / ".claude" / "skills").iterdir())
+    assert names == ["codeatlas-audit", "codeatlas-context", "codeatlas-decisions", "codeatlas-refresh"]
+    pre = json.loads((tiny_repo / ".claude" / "settings.json").read_text())["hooks"]["PreToolUse"]
+    assert pre[0]["matcher"] == "Read"
+    assert pre[0]["hooks"][0]["command"] == "codeatlas hook dedupe-read"
+    installed_hooks = json.loads((tiny_repo / ".claude" / "settings.json").read_text())["hooks"]
+    assert "Read" in installed_hooks["PostToolUse"][0]["matcher"]
+    for event in ("PostToolUse", "SessionStart"):
+        assert any(
+            h["command"] == "codeatlas hook dedupe-read" for h in installed_hooks[event][0]["hooks"]
+        )
+    # taking the integration out removes every one of them again
+    apply_uninstall(tiny_repo, plan_uninstall(tiny_repo))
+    assert not (tiny_repo / ".claude" / "settings.json").exists()
+
+
+def test_cursor_rules_are_small_and_procedures_are_on_request(tiny_repo: Path) -> None:
+    install(tiny_repo, "cursor")
+    rules = tiny_repo / ".cursor" / "rules"
+    always = (rules / "codeatlas.mdc").read_text(encoding="utf-8")
+    assert always.startswith("---\ndescription:") and "alwaysApply: true" in always
+    assert "codeatlas_task" in always
+    # Sent on every turn, so it carries only how to start; procedures are asked for by description.
+    assert "Codebase Audit" not in always and len(always) < 1500
+    for name in ("codeatlas-audit", "codeatlas-refresh", "codeatlas-decisions"):
+        text = (rules / f"{name}.mdc").read_text(encoding="utf-8")
+        assert "alwaysApply: false" in text and "description:" in text
+    assert json.loads((tiny_repo / ".cursor" / "mcp.json").read_text())["mcpServers"]["codeatlas"][
+        "args"
+    ] == ["mcp"]
+    hooks = json.loads((tiny_repo / ".cursor" / "hooks.json").read_text())
+    assert hooks["version"] == 1
+    assert hooks["hooks"]["sessionStart"] == [
+        {"command": "codeatlas hook session-start --format cursor"}
+    ]
+    assert hooks["hooks"]["afterFileEdit"] == [{"command": "codeatlas hook post-edit"}]
+
+
+def test_cursor_hooks_keep_the_users_own(tiny_repo: Path) -> None:
+    (tiny_repo / ".cursor").mkdir()
+    mine = {"version": 1, "hooks": {"afterFileEdit": [{"command": "./format.sh"}]}}
+    (tiny_repo / ".cursor" / "hooks.json").write_text(json.dumps(mine))
+    install(tiny_repo, "cursor")
+    merged = json.loads((tiny_repo / ".cursor" / "hooks.json").read_text())
+    assert [h["command"] for h in merged["hooks"]["afterFileEdit"]] == [
+        "./format.sh",
+        "codeatlas hook post-edit",
+    ]
+    apply_uninstall(tiny_repo, plan_uninstall(tiny_repo))
+    assert json.loads((tiny_repo / ".cursor" / "hooks.json").read_text()) == mine
+
+
+def test_codex_install_contents(tiny_repo: Path) -> None:
+    install(tiny_repo, "codex")
+    assert "CODEATLAS code index" in (tiny_repo / "AGENTS.md").read_text()
+    config = (tiny_repo / ".codex" / "config.toml").read_text()
+    assert "[mcp_servers.codeatlas]" in config and 'args = ["mcp"]' in config
+    parsed = tomllib.loads(config)
+    assert parsed["mcp_servers"]["codeatlas"]["command"] == "codeatlas"
+    hooks = json.loads((tiny_repo / ".codex" / "hooks.json").read_text())["hooks"]
+    assert hooks["UserPromptSubmit"][0]["hooks"][0]["command"] == "codeatlas hook user-prompt"
+    assert hooks["PostToolUse"][0]["matcher"] == "apply_patch|Edit|Write"
+    assert hooks["SessionStart"][0]["hooks"][0]["command"] == "codeatlas hook session-start"
+    plan = plan_init(tiny_repo, ["codex"], IntegrationOptions())
+    assert plan.file_changes == ()  # idempotent
+
+
+def test_codex_never_declares_the_users_codeatlas_server_twice(tiny_repo: Path) -> None:
+    (tiny_repo / ".codex").mkdir()
+    mine = '[mcp_servers.codeatlas]\ncommand = "my-codeatlas"\nargs = ["serve"]\n\n[model]\nname = "x"\n'
+    (tiny_repo / ".codex" / "config.toml").write_text(mine)
+    install(tiny_repo, "codex")
+    after = (tiny_repo / ".codex" / "config.toml").read_text()
+    assert after == mine
+    assert tomllib.loads(after)["mcp_servers"]["codeatlas"]["command"] == "my-codeatlas"
+
+
+def test_codex_toml_merge_and_exact_restore(tiny_repo: Path) -> None:
+    (tiny_repo / ".codex").mkdir()
+    mine = 'model = "o3"\n\n[mcp_servers.other]\ncommand = "x"\n'
+    (tiny_repo / ".codex" / "config.toml").write_text(mine)
+    install(tiny_repo, "codex")
+    merged = tomllib.loads((tiny_repo / ".codex" / "config.toml").read_text())
+    assert set(merged["mcp_servers"]) == {"other", "codeatlas"} and merged["model"] == "o3"
+    apply_uninstall(tiny_repo, plan_uninstall(tiny_repo))
+    assert (tiny_repo / ".codex" / "config.toml").read_text() == mine
+    assert not (tiny_repo / ".codex" / "hooks.json").exists()
+    assert not (tiny_repo / "AGENTS.md").exists()
+
+
+def test_codex_tells_the_user_about_project_trust(tiny_repo: Path) -> None:
+    from codeatlas.integrations import get_integration
+
+    notes = get_integration("codex").notes(tiny_repo, IntegrationOptions())
+    assert any("trust" in n.lower() for n in notes)
+    assert (
+        get_integration("codex").notes(tiny_repo, IntegrationOptions(hooks=False, mcp=False)) == []
+    )
+
+
+def test_gemini_install_contents_and_merge(tiny_repo: Path) -> None:
+    (tiny_repo / ".gemini").mkdir()
+    mine = {"theme": "dark", "mcpServers": {"other": {"command": "x"}}}
+    (tiny_repo / ".gemini" / "settings.json").write_text(json.dumps(mine))
+    install(tiny_repo, "gemini")
+    settings = json.loads((tiny_repo / ".gemini" / "settings.json").read_text())
+    assert settings["theme"] == "dark" and set(settings["mcpServers"]) == {"other", "codeatlas"}
+    hooks = settings["hooks"]
+    assert hooks["BeforeAgent"][0]["hooks"][0]["command"] == (
+        "codeatlas hook user-prompt --format json --event BeforeAgent"
+    )
+    assert hooks["SessionStart"][0]["hooks"][0]["timeout"] == 10000  # milliseconds
+    assert hooks["AfterTool"][0]["matcher"] == "write_file|replace"
+    assert "CODEATLAS code index" in (tiny_repo / "GEMINI.md").read_text()
+    apply_uninstall(tiny_repo, plan_uninstall(tiny_repo))
+    assert json.loads((tiny_repo / ".gemini" / "settings.json").read_text()) == mine
+    assert not (tiny_repo / "GEMINI.md").exists()
+
+
+def test_antigravity_installs_an_always_active_block_a_hook_and_prints_the_mcp_entry(
+    tiny_repo: Path,
+) -> None:
+    from codeatlas.integrations import get_integration
+
+    options = IntegrationOptions()
+    install(tiny_repo, "antigravity")
+    agents = (tiny_repo / "AGENTS.md").read_text(encoding="utf-8")  # always active, no front matter
+    assert "codeatlas_task" in agents and "codeatlas-managed" in agents
+    hooks = json.loads((tiny_repo / ".agents" / "hooks.json").read_text(encoding="utf-8"))
+    handler = hooks["codeatlas"]["PreInvocation"][0]
+    assert handler["command"] == "codeatlas hook pre-invocation" and handler["type"] == "command"
+    assert (tiny_repo / ".agents" / "skills" / "codeatlas-context" / "SKILL.md").is_file()
+    assert not (
+        tiny_repo / ".agent" / "rules" / "codeatlas.md"
+    ).exists()  # never loaded unconditionally
+    (note,) = get_integration("antigravity").notes(tiny_repo, options)
+    assert ".gemini/config/mcp_config.json" in note and '"codeatlas"' in note
+    # CODEATLAS never edits user-level config on its own.
+    assert not any(
+        c.path.startswith(("~", "/")) for c in plan_init(tiny_repo, ["antigravity"]).file_changes
+    )
+    apply_uninstall(tiny_repo, plan_uninstall(tiny_repo))
+    assert not (tiny_repo / ".agents" / "hooks.json").exists()
+    assert (
+        "codeatlas"
+        not in (
+            (tiny_repo / "AGENTS.md").read_text(encoding="utf-8")
+            if (tiny_repo / "AGENTS.md").exists()
+            else ""
+        ).lower()
+    )
+
+
+def test_antigravity_keeps_the_users_own_hooks(tiny_repo: Path) -> None:
+    (tiny_repo / ".agents").mkdir()
+    mine = {
+        "lint": {"PostToolUse": [{"matcher": "run_command", "hooks": [{"command": "./lint.sh"}]}]}
+    }
+    (tiny_repo / ".agents" / "hooks.json").write_text(json.dumps(mine), encoding="utf-8")
+    install(tiny_repo, "antigravity")
+    both = json.loads((tiny_repo / ".agents" / "hooks.json").read_text(encoding="utf-8"))
+    assert both["lint"] == mine["lint"] and "codeatlas" in both
+    apply_uninstall(tiny_repo, plan_uninstall(tiny_repo))
+    assert json.loads((tiny_repo / ".agents" / "hooks.json").read_text(encoding="utf-8")) == mine
+
+
+@pytest.mark.parametrize(
+    "agent", ["claude-code", "cursor", "codex", "gemini", "antigravity", "generic"]
+)
+def test_every_agent_is_idempotent_reversible_and_leaves_user_files_alone(
+    tiny_repo: Path, agent: str
+) -> None:
+    mine = {
+        "AGENTS.md": "# Team rules\n\nBe kind.\n",
+        "CLAUDE.md": "# Mine\n",
+        "GEMINI.md": "# Gemini mine\n",
+    }
+    for name, text in mine.items():
+        (tiny_repo / name).write_text(text)
+    before = snapshot(tiny_repo)
+    install(tiny_repo, agent)
+    once = snapshot(tiny_repo)
+    install(tiny_repo, agent)
+    assert snapshot(tiny_repo) == once  # a second init changes nothing
+    apply_uninstall(tiny_repo, plan_uninstall(tiny_repo))
+    after = snapshot(tiny_repo)
+    after.pop(".gitignore", None)  # belongs to the index itself, not the integration
+    assert after == before
+
+
+def test_detect_finds_every_agent_that_is_present(tmp_path: Path) -> None:
+    for marker in (".claude", ".cursor", ".codex", ".gemini", ".agent"):
+        (tmp_path / marker).mkdir()
+    assert detect_agents(tmp_path) == ["claude-code", "cursor", "codex", "gemini", "antigravity"]
+
+
+def test_hook_commands_in_every_config_are_ones_the_cli_accepts(tiny_repo: Path) -> None:
+    """A hook entry that names a flag `codeatlas hook` does not know would silently never work."""
+    import re
+    import shlex
+
+    from codeatlas.hooks.entry import HOOKS, parse_flags
+
+    for agent in ("claude-code", "cursor", "codex", "gemini"):
+        install(tiny_repo, agent)
+    text = "\n".join(
+        p.read_text(encoding="utf-8")
+        for p in tiny_repo.rglob("*")
+        if p.is_file() and p.suffix in {".json"} and ".aicontext" not in p.parts
+    )
+    commands = set(re.findall(r'"command": "(codeatlas hook [^"]+)"', text))
+    assert len(commands) >= 5
+    for command in commands:
+        words = shlex.split(command)
+        assert words[2] in HOOKS, command
+        flags = parse_flags(words[3:])
+        assert set(flags) <= {"format", "event"}, command
+        assert flags.get("format", "text") in ("text", "json", "cursor"), command
+
+
+def _git(root: Path, *args: str) -> None:
+    subprocess.run(["git", *args], cwd=root, check=True, capture_output=True)
+
+
+def test_git_hooks_install_and_remove(tiny_repo: Path) -> None:
+    _git(tiny_repo, "init", "-q")
+    hooks = tiny_repo / ".git" / "hooks"
+    hooks.mkdir(exist_ok=True)
+    (hooks / "post-commit").write_text("#!/bin/sh\necho mine\n")
+    apply_init(plan_init(tiny_repo, [], git_hooks=True))
+    text = (hooks / "post-commit").read_text()
+    assert text.startswith("#!/bin/sh\necho mine\n") and "codeatlas update --quiet" in text
+    assert "codeatlas update --quiet" in (hooks / "post-merge").read_text()
+    apply_uninstall(tiny_repo, plan_uninstall(tiny_repo))
+    assert (hooks / "post-commit").read_text() == "#!/bin/sh\necho mine\n"
+    assert not (hooks / "post-merge").exists()
+
+
+def test_nested_project_does_not_install_hooks_in_ancestor_git(tmp_path: Path) -> None:
+    from codeatlas.integrations.git_hooks import hooks_dir
+
+    _git(tmp_path, "init", "-q")
+    child = tmp_path / "nested"
+    child.mkdir()
+    assert hooks_dir(child) is None
+    before = {p.name: p.read_bytes() for p in (tmp_path / ".git/hooks").iterdir()}
+    apply_init(plan_init(child, [], git_hooks=True))
+    assert {p.name: p.read_bytes() for p in (tmp_path / ".git/hooks").iterdir()} == before
+
+
+def test_purge_removes_index_and_consent(tiny_repo: Path) -> None:
+    from codeatlas.consent import get_entry
+
+    install(tiny_repo, "generic")
+    assert get_entry(tiny_repo) is not None
+    apply_uninstall(tiny_repo, plan_uninstall(tiny_repo), purge=True)
+    assert not (tiny_repo / ".aicontext").exists()
+    assert get_entry(tiny_repo) is None
+    assert not (tiny_repo / ".gitignore").exists()
+
+
+@pytest.fixture
+def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    return home
+
+
+def test_global_note(fake_home: Path) -> None:
+    target = fake_home / ".claude" / "CLAUDE.md"
+    target.parent.mkdir()
+    target.write_text("# Global rules\n")
+    install_global()
+    text = target.read_text()
+    assert "Never run `codeatlas init`" in text and "mention CODEATLAS once" not in text
+    install_global(suggest=True)
+    assert "mention CODEATLAS once" in target.read_text()
+    uninstall_global()
+    assert target.read_text() == "# Global rules\n"
+
+
+@pytest.mark.parametrize(
+    "agent,directory", [("claude-code", ".claude"), ("antigravity", ".agents")]
+)
+def test_skill_supporting_resources_are_planned_and_restored(
+    tiny_repo: Path, agent: str, directory: str
+) -> None:
+    from codeatlas.integrations.common import skill_files
+
+    relative = f"{directory}/skills/codeatlas-context/references/retrieval.md"
+    reference = tiny_repo / relative
+    reference.parent.mkdir(parents=True)
+    reference.write_text("owner reference\n", encoding="utf-8")
+    plan = plan_init(tiny_repo, [agent], IntegrationOptions())
+    assert relative in {change.path for change in plan.file_changes}
+    apply_init(plan)
+    assert (
+        reference.read_text(encoding="utf-8")
+        == dict(skill_files("codeatlas-context"))["references/retrieval.md"]
+    )
+    assert plan_init(tiny_repo, [agent], IntegrationOptions()).file_changes == ()
+    apply_uninstall(tiny_repo, plan_uninstall(tiny_repo))
+    assert reference.read_text(encoding="utf-8") == "owner reference\n"

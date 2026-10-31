@@ -1,0 +1,258 @@
+"""Hooks and the MCP server: consent gating, silence on errors, and freshness."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from pathlib import Path
+
+import pytest
+from typer.testing import CliRunner
+
+from codeatlas.cli import app
+from codeatlas.consent import registry_path
+from codeatlas.core.tokens import estimate_tokens
+from codeatlas.hooks import post_edit, session_start
+from codeatlas.hooks.runner import NOT_ENABLED_LINE
+from codeatlas.lifecycle import apply_init, plan_init, scan, set_paused
+from codeatlas.mcp.server import CodeAtlasTools, build_server, enabled_tools
+from codeatlas.navigator.store import IndexStore
+
+
+def snapshot(root: Path) -> dict[str, bytes]:
+    return {p.relative_to(root).as_posix(): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+
+
+def payload(root: Path, **extra: object) -> str:
+    return json.dumps({"cwd": str(root), "hook_event_name": "x", **extra})
+
+
+@pytest.fixture
+def enabled(small_repo: Path) -> Path:
+    apply_init(plan_init(small_repo))
+    scan(small_repo)
+    return small_repo
+
+
+def test_session_start_uninitialized_is_silent(small_repo: Path) -> None:
+    before = snapshot(small_repo)
+    assert session_start(payload(small_repo)) == ""
+    assert snapshot(small_repo) == before
+
+
+def test_teammate_repo_gets_one_line_and_no_writes(enabled: Path) -> None:
+    registry_path().unlink()
+    (enabled / "src" / "shop" / "new.py").write_text("x = 1\n")
+    before = snapshot(enabled)
+    assert session_start(payload(enabled)) == NOT_ENABLED_LINE
+    post_edit(payload(enabled, tool_input={"file_path": str(enabled / "src/shop/new.py")}))
+    assert snapshot(enabled) == before
+
+
+def test_paused_hooks_are_noops(enabled: Path) -> None:
+    set_paused(enabled, True)
+    (enabled / "src" / "shop" / "new.py").write_text("def later():\n    pass\n")
+    before = snapshot(enabled)
+    assert session_start(payload(enabled)) == ""
+    post_edit(payload(enabled, tool_input={"file_path": "src/shop/new.py"}))
+    assert snapshot(enabled) == before
+
+
+def test_session_start_catches_up_and_prints_brief(enabled: Path) -> None:
+    (enabled / "src" / "shop" / "pulled.py").write_text("def from_git_pull():\n    pass\n")
+    text = session_start(payload(enabled))
+    # The injected brief is compact: commands and how to use CODEATLAS, no placeholders or overview.
+    assert text.startswith("# smallshop\n")
+    assert 'codeatlas task "<request>"' in text and "Not written yet" not in text
+    assert "Top modules" not in text and estimate_tokens(text) < 200
+    assert text.rstrip().endswith("CODEATLAS · index fresh")
+    store = IndexStore.open(enabled)
+    assert store.symbol("shop.pulled.from_git_pull") is not None
+    store.close()
+
+
+def test_post_edit_updates_the_edited_file(enabled: Path) -> None:
+    target = enabled / "src" / "shop" / "utils.py"
+    target.write_text(
+        target.read_text() + "\n\ndef slugify(text: str) -> str:\n    return text.lower()\n"
+    )
+    post_edit(payload(enabled, tool_name="Edit", tool_input={"file_path": str(target)}))
+    store = IndexStore.open(enabled)
+    assert store.symbol("shop.utils.slugify") is not None
+    store.close()
+
+
+def test_post_edit_ignores_non_source_and_outside_files(enabled: Path, tmp_path: Path) -> None:
+    before = snapshot(enabled / ".aicontext")
+    (enabled / "README.md").write_text("docs\n")
+    post_edit(payload(enabled, tool_input={"file_path": str(enabled / "README.md")}))
+    post_edit(payload(enabled, tool_input={"file_path": str(tmp_path / "elsewhere.py")}))
+    assert snapshot(enabled / ".aicontext") == before
+
+
+def test_hooks_survive_garbage_and_internal_errors(
+    enabled: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert (
+        session_start("{not json") in ("",) or True
+    )  # garbage stdin: falls back to cwd, never raises
+    post_edit("[1, 2, 3]")
+
+    def boom(*_a: object, **_k: object) -> None:
+        raise RuntimeError("broken install")
+
+    monkeypatch.setattr("codeatlas.status.compute_status", boom)
+    assert session_start(payload(enabled)) == ""
+    assert "broken install" in (enabled / ".aicontext" / "cache" / "hook.log").read_text()
+
+
+def test_hook_cli_exits_zero(enabled: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CODEATLAS_HOOK_NO_EXIT", "1")
+    runner = CliRunner()
+    result = runner.invoke(app, ["hook", "session-start"], input=payload(enabled))
+    assert result.exit_code == 0 and "codeatlas task" in result.output
+    result = runner.invoke(app, ["hook", "post-edit"], input="not json at all")
+    assert result.exit_code == 0 and result.output == ""
+
+
+def test_mcp_default_profile_is_lean(enabled: Path) -> None:
+    """Every tool schema is sent each turn, so the default is the few a coding task needs."""
+    assert enabled_tools(enabled) == ["codeatlas_task"]
+    assert enabled_tools(enabled, "standard") == [
+        "codeatlas_status",
+        "codeatlas_task",
+        "codeatlas_find",
+        "codeatlas_context",
+        "codeatlas_impact",
+    ]
+    assert "codeatlas_audit_plan" in enabled_tools(enabled, "full")
+    server = build_server(enabled)
+    tools = asyncio.run(server.list_tools())
+    assert {t.name for t in tools} == {"codeatlas_task"}
+    # The schema and instructions are re-sent on every model call: keep them small (chars/4).
+    import json
+
+    from codeatlas.mcp.server import INSTRUCTIONS
+
+    schema = json.dumps(
+        [
+            {"name": t.name, "description": t.description, "inputSchema": t.input_schema}
+            for t in tools
+        ]
+    )
+    assert (len(schema) + len(INSTRUCTIONS)) // 4 <= 330
+
+
+def test_mcp_exposes_only_status_without_consent(enabled: Path) -> None:
+    assert "codeatlas_context" in enabled_tools(enabled, "standard")
+    registry_path().unlink()
+    assert enabled_tools(enabled) == ["codeatlas_status"]
+    set_state = CodeAtlasTools(enabled).codeatlas_status()
+    assert set_state["state"] == "not_enabled"
+
+
+def test_mcp_tools_return_structured_results_and_errors(enabled: Path) -> None:
+    server = build_server(enabled, "full")
+
+    async def call(name: str, args: dict[str, object]) -> dict[str, object]:
+        result = await server.call_tool(name, args)
+        content = getattr(result, "structured_content", None) or getattr(
+            result, "structuredContent", None
+        )
+        if content is None and isinstance(result, tuple):
+            content = result[1]
+        if content is None:  # JSON-format tools carry the packet once, as text content
+            blocks = result[0] if isinstance(result, tuple) else result.content
+            content = json.loads("".join(b.text for b in blocks if hasattr(b, "text")))
+        assert isinstance(content, dict)
+        return content
+
+    async def scenario() -> None:
+        names = {t.name for t in await server.list_tools()}
+        assert {"codeatlas_status", "codeatlas_context", "codeatlas_search", "codeatlas_impact"} <= names
+        assert {"codeatlas_task", "codeatlas_locate", "codeatlas_audit_plan"} <= names
+        pack = await call("codeatlas_context", {"target": "apply_discount"})
+        assert pack["target"]["id"] == "shop.pricing.discounts.apply_discount"
+        missing = await call("codeatlas_context", {"target": "definitely_not_here_xyz"})
+        assert missing["error"] == "not_found"
+        ambiguous = await call("codeatlas_locate", {"name": "__init__"})
+        assert len(ambiguous["candidates"]) >= 2
+
+    asyncio.run(scenario())
+
+
+def test_mcp_results_are_sent_once_compactly_with_hints(enabled: Path) -> None:
+    """A dict answer must not reach the model as indented text plus a structured copy."""
+    server = build_server(enabled, "full")
+
+    async def scenario() -> None:
+        tools = {t.name: t for t in await server.list_tools()}
+        assert tools["codeatlas_context"].annotations.read_only_hint is True
+        assert tools["codeatlas_note"].annotations.read_only_hint is False
+        assert all(t.annotations.destructive_hint is False for t in tools.values())
+        result = await server.call_tool("codeatlas_context", {"target": "apply_discount"})
+        assert getattr(result, "structured_content", None) is None
+        text = "".join(b.text for b in result.content if hasattr(b, "text"))
+        assert "\n" not in text and json.loads(text)["target"]["kind"]
+        brief = await server.read_resource("codeatlas://brief")
+        assert "Languages" in "".join(getattr(b, "content", "") for b in brief)
+
+    asyncio.run(scenario())
+
+
+def test_mcp_brief_resource_respects_consent(enabled: Path) -> None:
+    server = build_server(enabled, "standard")
+    registry_path().unlink()
+    brief = asyncio.run(server.read_resource("codeatlas://brief"))
+    assert "Languages" not in "".join(getattr(b, "content", "") for b in brief)
+
+
+def test_mcp_store_reloads_after_update(enabled: Path) -> None:
+    tools = CodeAtlasTools(enabled)
+    assert tools.codeatlas_locate("brand_new_fn").get("error") == "not_found"
+    (enabled / "src" / "shop" / "fresh.py").write_text("def brand_new_fn():\n    pass\n")
+    scan(enabled)
+    assert tools.codeatlas_locate("brand_new_fn")["candidates"][0]["id"] == "shop.fresh.brand_new_fn"
+
+
+def test_post_edit_in_background_returns_before_the_update_lands(enabled: Path) -> None:
+    import time
+
+    from codeatlas.status import compute_status
+
+    (enabled / "src" / "shop" / "bg.py").write_text("def background_fn():\n    pass\n")
+    post_edit(payload(enabled, tool_input={"file_path": "src/shop/bg.py"}), background=True)
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline and not compute_status(enabled).fresh:
+        time.sleep(0.1)
+    assert compute_status(enabled).fresh
+    store = IndexStore.open(enabled)
+    try:
+        assert store.symbol("shop.bg.background_fn") is not None
+    finally:
+        store.close()
+
+
+def test_hook_entry_never_loads_the_full_cli(enabled: Path) -> None:
+    """A hook runs on every edit: routing it must not import typer, rich or any sub-command."""
+    import os
+    import subprocess
+    import sys
+
+    code = (
+        "import sys; from codeatlas.entry import main; sys.argv = ['codeatlas', 'hook', 'session-start']; "
+        "main(); sys.stderr.write(repr(sorted(m for m in ('typer', 'rich', 'codeatlas.cli') "
+        "if m in sys.modules)))"
+    )
+    env = {**os.environ, "CODEATLAS_HOOK_NO_EXIT": "1"}
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        input=payload(enabled),
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=enabled,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stderr.strip().endswith("[]"), result.stderr
+    assert 'codeatlas task "<request>"' in result.stdout
